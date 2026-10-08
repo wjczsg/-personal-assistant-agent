@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     # SQLite 数据库文件名。
     database_file: str = "assistant.db"
+    # 天气服务地址。Open-Meteo 的接口不需要 API Key。
+    weather_geocoding_url: str = "https://geocoding-api.open-meteo.com/v1/search"
+    weather_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
 
     # 告诉 Pydantic 从项目根目录的 .env 文件读取配置。
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

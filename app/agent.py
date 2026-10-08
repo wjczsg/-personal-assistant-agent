@@ -9,7 +9,7 @@ from typing import Any
 # 导入配置、记忆和工具函数。
 from .config import settings
 from .database import get_recent_messages, save_message
-from .tools import calculator, get_current_time, get_todos, remember_todo
+from .tools import calculator, get_current_time, get_todos, get_weather, remember_todo
 
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
@@ -28,7 +28,7 @@ class PersonalAssistantAgent:
         return result
 
     # 根据用户文字做几个适合初学者的工具调用判断。
-    def _try_tools(self, message: str) -> str | None:
+    async def _try_tools(self, message: str) -> str | None:
         # 识别“算 12 * 8”或“计算 12*8”这类简单表达。
         match = re.search(r"(?:算|计算)\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)", message)
         # 如果识别到了算式，就调用计算器工具。
@@ -41,6 +41,19 @@ class PersonalAssistantAgent:
             b = float(match.group(3))
             # 执行计算并记录工具调用。
             return self._record_tool("calculator", calculator(a, b, operator))
+        # 用户询问天气时调用天气工具。
+        if any(keyword in message for keyword in ["天气", "气温", "下雨", "降温", "温度"]):
+            # 支持“查询北京天气”“北京今天的天气”等常见表达。
+            city_match = re.search(
+                r"(?:帮我)?(?:查询|查一下|查|看看|告诉我|问一下)?\s*"
+                r"([\u4e00-\u9fa5A-Za-z·]{2,20}?)\s*"
+                r"(?:今天|明天|现在|当前)?(?:的)?(?:天气|气温|温度)",
+                message,
+            )
+            if not city_match:
+                return self._record_tool("get_weather", "请告诉我想查询的城市，例如：查询北京天气。")
+            city = city_match.group(1).strip()
+            return self._record_tool("get_weather", await get_weather(city))
         # 用户询问时间时调用时间工具。
         if "几点" in message or "时间" in message or "日期" in message:
             # 执行时间工具并记录调用结果。
@@ -99,7 +112,7 @@ class PersonalAssistantAgent:
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
         # 尝试调用工具。
-        tool_result = self._try_tools(message)
+        tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:
             # 保存 Agent 的回答，下一次对话就能记住它。
