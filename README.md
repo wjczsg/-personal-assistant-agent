@@ -44,6 +44,7 @@ python -m uvicorn app.main:app --reload
 
 浏览器打开：
 
+- 个人助理网页：http://127.0.0.1:8000/
 - 接口文档：http://127.0.0.1:8000/docs
 - 健康检查：http://127.0.0.1:8000/health
 

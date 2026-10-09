@@ -1,5 +1,9 @@
 ﻿# 从 FastAPI 导入创建 Web 应用所需的类。
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
 from .agent import PersonalAssistantAgent
 from .database import init_database
@@ -11,6 +15,16 @@ app = FastAPI(
     description="一个包含对话、工具调用和记忆功能的入门项目。",
     version="1.0.0",
 )
+
+# 前端静态资源目录；浏览器打开根地址时会加载这里的网页。
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def home() -> FileResponse:
+    """返回个人助理的 Web 页面。"""
+    return FileResponse(STATIC_DIR / "index.html")
 
 # 应用启动时先确保 SQLite 数据库和数据表已经存在。
 @app.on_event("startup")
