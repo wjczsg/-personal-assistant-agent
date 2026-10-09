@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小熊助手</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">ʕ•ᴥ•ʔ</span>
+        <div>
+          <h1>小熊助手</h1>
+          <p>有事情，告诉我就好</p>
+        </div>
+      </div>
+      <button id="clearButton" class="clear-button" type="button">清空对话</button>
+    </header>
+
+    <section class="chat-card" aria-label="聊天区域">
+      <div id="messageList" class="message-list" aria-live="polite"></div>
+
+      <div class="quick-actions" aria-label="快捷提问">
+        <button type="button" data-message="查询北京天气">☁ 北京天气</button>
+        <button type="button" data-message="帮我算一下 12 * 8">✎ 算一算</button>
+        <button type="button" data-message="记住我今天要学习 FastAPI">♡ 记待办</button>
+        <button type="button" data-message="我的待办有哪些">☷ 看待办</button>
+      </div>
+
+      <form id="chatForm" class="composer">
+        <label class="sr-only" for="messageInput">输入消息</label>
+        <textarea id="messageInput" rows="1" placeholder="输入你想说的话……" autocomplete="off"></textarea>
+        <button id="sendButton" class="send-button" type="submit">发送</button>
+      </form>
+      <p class="hint">Enter 发送 · Shift + Enter 换行</p>
+    </section>
+
+    <footer>小熊助手 · 你的日常小帮手</footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
