@@ -86,6 +86,7 @@ app/
 ├── database.py   # SQLite 数据库和记忆
 ├── schemas.py    # 请求和响应的数据格式
 ├── tools.py      # Agent 可以调用的工具
+├── tool_registry.py # 工具描述、工具注册和统一执行入口
 └── agent.py      # Agent 的思考和工具调用流程
 ```
 

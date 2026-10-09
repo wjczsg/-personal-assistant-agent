@@ -9,40 +9,7 @@ from typing import Any
 # 导入配置、记忆和工具函数。
 from .config import settings
 from .database import get_recent_messages, save_message
-from .tools import calculator, get_current_time, get_todos, get_weather, remember_todo
-
-# 定义计算器工具的描述，模型会根据这份描述判断什么时候调用计算器。
-CALCULATOR_TOOL = {
-    # 告诉兼容 OpenAI 格式的接口：这是一个函数工具。
-    "type": "function",
-    # 放置函数的名称、用途和参数结构。
-    "function": {
-        # 函数名必须和后端识别工具调用时使用的名字一致。
-        "name": "calculator",
-        # 这段描述帮助模型理解什么时候应该使用计算器。
-        "description": "计算两个数字的加法、减法、乘法或除法。",
-        # 用 JSON Schema 描述函数需要接收的参数。
-        "parameters": {
-            # 参数整体是一个 JSON 对象。
-            "type": "object",
-            # 列出计算器支持的三个参数。
-            "properties": {
-                # 第一个数字参数。
-                "a": {"type": "number", "description": "第一个数字"},
-                # 第二个数字参数。
-                "b": {"type": "number", "description": "第二个数字"},
-                # 运算符参数，只允许四种基本运算。
-                "operator": {
-                    "type": "string",
-                    "enum": ["+", "-", "*", "/"],
-                    "description": "要执行的运算符",
-                },
-            },
-            # required 表示模型调用函数时必须提供这些参数。
-            "required": ["a", "b", "operator"],
-        },
-    },
-}
+from .tool_registry import execute_tool, get_tool_definitions
 
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
@@ -85,15 +52,15 @@ class PersonalAssistantAgent:
             # 取出正则表达式识别到的城市名称。
             city = city_match.group(1).strip()
             # 调用异步天气工具并记录工具结果。
-            return self._record_tool("get_weather", await get_weather(city))
+            return self._record_tool("get_weather", await execute_tool("get_weather", {"city": city}, self.user_id))
         # 用户询问时间时调用时间工具。
         if "几点" in message or "时间" in message or "日期" in message:
             # 执行时间工具并记录调用结果。
-            return self._record_tool("get_current_time", get_current_time())
+            return self._record_tool("get_current_time", await execute_tool("get_current_time", {}, self.user_id))
         # 用户询问待办时读取待办工具；这个判断要放在“添加待办”之前。
         if "我的待办" in message or "有哪些待办" in message or "待办事项" in message:
             # 调用待办查询工具。
-            return self._record_tool("get_todos", get_todos(self.user_id))
+            return self._record_tool("get_todos", await execute_tool("get_todos", {}, self.user_id))
         # 用户说“记住”或“添加待办”时，把后面的内容保存起来。
         if "记住" in message or "添加待办" in message:
             # 去掉常见的触发词，留下真正要记住的内容。
@@ -102,24 +69,14 @@ class PersonalAssistantAgent:
             if not content:
                 return self._record_tool("remember_todo", "请告诉我具体要记住什么。")
             # 调用记事工具。
-            return self._record_tool("remember_todo", remember_todo(self.user_id, content))
+            return self._record_tool("remember_todo", await execute_tool("remember_todo", {"content": content}, self.user_id))
         # 没有需要调用其他工具时返回 None。
         return None
 
     # 执行模型返回的计算器调用，并把参数转换成 calculator 函数需要的类型。
-    def _execute_calculator_tool(self, arguments: dict[str, Any]) -> str:
-        # 读取模型传来的第一个数字，并强制转换成浮点数。
-        a = float(arguments["a"])
-        # 读取模型传来的第二个数字，并强制转换成浮点数。
-        b = float(arguments["b"])
-        # 读取模型传来的运算符。
-        operator = arguments["operator"]
-        # 检查运算符是否在计算器允许的范围内。
-        if operator not in {"+", "-", "*", "/"}:
-            # 参数不合法时返回错误，不执行未知操作。
-            return "运算符必须是 +、-、* 或 /。"
-        # 调用原有的 calculator 函数，真正执行数学运算。
-        result = calculator(a, b, operator)
+    async def _execute_calculator_tool(self, arguments: dict[str, Any]) -> str:
+        # 通过工具注册表执行计算器，避免 Agent 直接依赖具体实现函数。
+        result = await execute_tool("calculator", arguments, self.user_id)
         # 将结果记录到本次响应的工具调用列表中。
         return self._record_tool("calculator", result)
 
@@ -159,7 +116,7 @@ class PersonalAssistantAgent:
                     json={
                         "model": settings.llm_model,
                         "messages": messages,
-                        "tools": [CALCULATOR_TOOL],
+                        "tools": get_tool_definitions(["calculator"]),
                         "tool_choice": "auto",
                         "temperature": 0.7,
                     },
@@ -192,7 +149,7 @@ class PersonalAssistantAgent:
                     tool_result = f"未知工具：{function_name}"
                 else:
                     # 执行计算器并记录工具调用结果。
-                    tool_result = self._execute_calculator_tool(arguments)
+                    tool_result = await self._execute_calculator_tool(arguments)
                 # 把工具执行结果以 tool 消息放回对话上下文。
                 messages.append(
                     {
