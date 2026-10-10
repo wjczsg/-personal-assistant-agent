@@ -16,7 +16,7 @@ def get_connection() -> sqlite3.Connection:
     # 把连接对象交给调用者。
     return connection
 
-# 创建项目需要的两张表。
+# 创建项目需要的三张表。
 def init_database() -> None:
     # 打开数据库连接。
     connection = get_connection()
@@ -39,6 +39,16 @@ def init_database() -> None:
                 user_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 done INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # 创建长期记忆表；每条记忆都绑定到具体用户和记忆类型。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
@@ -106,3 +116,29 @@ def list_todos(user_id: str) -> list[dict[str, Any]]:
     connection.close()
     # 把 SQLite 行转换成普通字典。
     return [dict(row) for row in rows]
+
+
+# 保存一条长期记忆。
+def save_memory_record(user_id: str, content: str, memory_type: str) -> dict[str, Any]:
+    # 打开数据库连接。
+    connection = get_connection()
+    # 记录保存时间，后续可以按照时间管理记忆。
+    created_at = datetime.now().isoformat(timespec="seconds")
+    # 插入长期记忆，并使用参数化 SQL 避免直接拼接用户输入。
+    with connection:
+        cursor = connection.execute(
+            "INSERT INTO memories (user_id, content, memory_type, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, content, memory_type, created_at),
+        )
+        # 读取 SQLite 自动生成的记忆编号。
+        memory_id = cursor.lastrowid
+    # 关闭数据库连接，避免占用资源。
+    connection.close()
+    # 返回保存后的记录，工具可以用它组织用户能看懂的结果。
+    return {
+        "id": memory_id,
+        "user_id": user_id,
+        "content": content,
+        "memory_type": memory_type,
+        "created_at": created_at,
+    }

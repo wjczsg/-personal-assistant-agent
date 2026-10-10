@@ -3,7 +3,7 @@ from datetime import date as calendar_date, datetime
 import httpx
 
 from .config import settings
-from .database import add_todo, list_todos
+from .database import add_todo, list_todos, save_memory_record
 
 
 WEATHER_CODE_NAMES = {
@@ -167,3 +167,30 @@ def get_todos(user_id: str) -> str:
     if not todos:
         return "目前没有未完成的待办事项。"
     return "\n".join(f"#{todo['id']}：{todo['content']}" for todo in todos)
+
+
+def save_memory(user_id: str, content: str, memory_type: str) -> str:
+    """准备保存一条长期记忆，当前先完成工具层的参数校验。"""
+    # 去除用户编号、记忆内容和记忆类型两端多余的空格。
+    user_id = user_id.strip()
+    content = content.strip()
+    memory_type = memory_type.strip()
+
+    # 没有用户编号时无法判断这条记忆属于谁。
+    if not user_id:
+        return "保存记忆失败：缺少用户编号。"
+
+    # 没有内容时没有实际可保存的信息。
+    if not content:
+        return "保存记忆失败：记忆内容不能为空。"
+
+    # 第一版只允许三类长期记忆，避免模型传入任意分类。
+    allowed_types = {"user_goal", "preference", "profile"}
+    if memory_type not in allowed_types:
+        return "保存记忆失败：记忆类型必须是 user_goal、preference 或 profile。"
+
+    # 通过数据库层保存记忆，工具层不直接编写 SQL。
+    memory = save_memory_record(user_id, content, memory_type)
+
+    # 把数据库生成的编号和保存内容返回给调用方。
+    return f"已保存{memory['memory_type']}类型的长期记忆 #{memory['id']}：{memory['content']}"

@@ -6,7 +6,14 @@ import inspect
 from typing import Any, Awaitable, Callable
 
 # 导入真正执行工作的工具函数。
-from .tools import calculator, get_current_time, get_todos, get_weather, remember_todo
+from .tools import (
+    calculator,
+    get_current_time,
+    get_todos,
+    get_weather,
+    remember_todo,
+    save_memory,
+)
 
 
 # 定义工具执行函数的统一类型。
@@ -113,6 +120,35 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        # 注册长期记忆工具的模型描述。
+        "type": "function",
+        "function": {
+            # 长期记忆工具的名字，必须和执行映射表中的名字一致。
+            "name": "save_memory",
+            # 帮助模型判断哪些信息适合长期保存。
+            "description": "保存用户明确表达的长期目标、稳定偏好或个人背景；临时问题和普通闲聊不要保存。",
+            "parameters": {
+                # 工具参数整体是一个 JSON 对象。
+                "type": "object",
+                "properties": {
+                    # 要保存的长期记忆内容。
+                    "content": {
+                        "type": "string",
+                        "description": "要长期保存的用户信息，例如用户目标、偏好或个人背景",
+                    },
+                    # 记忆分类，限制为工具层支持的三种类型。
+                    "memory_type": {
+                        "type": "string",
+                        "enum": ["user_goal", "preference", "profile"],
+                        "description": "记忆类型：user_goal 表示用户目标，preference 表示用户偏好，profile 表示用户背景",
+                    },
+                },
+                # 模型必须同时提供记忆内容和记忆类型。
+                "required": ["content", "memory_type"],
+            },
+        },
+    },
 ]
 
 
@@ -158,6 +194,16 @@ async def _run_weather(arguments: dict[str, Any], user_id: str) -> str:
     return await get_weather(city, date)
 
 
+# 长期记忆工具的执行函数。
+async def _run_save_memory(arguments: dict[str, Any], user_id: str) -> str:
+    # 读取模型提取出的记忆内容。
+    content = str(arguments["content"])
+    # 读取模型判断出的记忆类型。
+    memory_type = str(arguments["memory_type"])
+    # 传入当前用户编号，让记忆保存到正确的用户下面。
+    return save_memory(user_id, content, memory_type)
+
+
 # 工具名称到执行函数的映射表。
 # Agent 只需要拿工具名称查表，不需要为每个工具继续添加一串 if。
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -171,6 +217,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "remember_todo": _run_remember_todo,
     # 注册天气执行函数。
     "get_weather": _run_weather,
+    # 注册长期记忆执行函数。
+    "save_memory": _run_save_memory,
 }
 
 
