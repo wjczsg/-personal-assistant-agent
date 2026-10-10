@@ -114,7 +114,7 @@ class PersonalAssistantAgent:
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
             # 说明五个工具各自的使用场景，帮助模型正确选择工具。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问某个城市的天气、气温或是否下雨时调用 get_weather，并把城市名称放入 city 参数。时间管理等普通知识问题直接简洁回答。",
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。时间管理等普通知识问题直接简洁回答。",
         }
         # 创建本次请求的消息列表。
         messages = [system_message]

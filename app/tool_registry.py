@@ -14,7 +14,7 @@ ToolHandler = Callable[[dict[str, Any], str], str | Awaitable[str]]
 
 
 # 给模型看的工具描述列表。
-# 目前 Agent 把 calculator 和 get_current_time 发送给模型，其他工具先保留供后续升级。
+# Agent 从这里读取全部五个工具的描述，再交给模型选择。
 TOOL_DEFINITIONS = [
     {
         # 告诉模型：这是一个函数工具。
@@ -96,13 +96,17 @@ TOOL_DEFINITIONS = [
             # 天气工具的名字。
             "name": "get_weather",
             # 说明这个工具的用途。
-            "description": "查询指定城市的当前天气。",
+            "description": "查询指定城市的当前天气，或未来 16 天内指定日期的每日天气预报。",
             "parameters": {
                 # 参数整体是一个 JSON 对象。
                 "type": "object",
-                # 天气工具需要城市名称。
+                # 天气工具需要城市名称，日期参数可选。
                 "properties": {
-                    "city": {"type": "string", "description": "要查询的城市名称"}
+                    "city": {"type": "string", "description": "要查询的城市名称"},
+                    "date": {
+                        "type": "string",
+                        "description": "不填或 now 查询当前实时天气；today、tomorrow、day_after_tomorrow 分别查询今天、明天、后天的每日预报；具体日期用 YYYY-MM-DD。仅支持城市当地今天起的未来 16 天，不支持历史天气或指定小时。",
+                    },
                 },
                 # city 是必填参数。
                 "required": ["city"],
@@ -148,8 +152,10 @@ async def _run_remember_todo(arguments: dict[str, Any], user_id: str) -> str:
 async def _run_weather(arguments: dict[str, Any], user_id: str) -> str:
     # 读取模型或其他调用方传入的城市名称。
     city = str(arguments["city"])
+    # 日期可选；缺省时保持原来的实时天气行为。
+    date = str(arguments.get("date", "now"))
     # 调用异步天气工具并等待网络结果。
-    return await get_weather(city)
+    return await get_weather(city, date)
 
 
 # 工具名称到执行函数的映射表。

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date as calendar_date, datetime
 
 import httpx
 
@@ -49,8 +49,23 @@ def get_current_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def get_weather(city: str) -> str:
-    """通过城市名查询当前天气，并格式化为 Agent 可直接使用的文字。"""
+async def get_weather(city: str, date: str = "now") -> str:
+    """查询城市当前天气，或查询未来 16 天内某一天的每日预报。"""
+    # 去除模型参数中的首尾空格，避免城市查找或日期匹配失败。
+    city = city.strip()
+    date = date.strip()
+    # 没有城市时直接提示，避免向地理编码接口发送空查询。
+    if not city:
+        return "请告诉我想查询的城市，例如：查询北京明天的天气。"
+    # 只接受明确的相对日期，或者完整的 YYYY-MM-DD 日期。
+    relative_days = {"today": 0, "tomorrow": 1, "day_after_tomorrow": 2}
+    if date not in {"now", *relative_days}:
+        try:
+            # 先解析，再比较原文，拒绝 2026-1-2 这类非标准日期格式。
+            if calendar_date.fromisoformat(date).isoformat() != date:
+                raise ValueError("日期格式不正确")
+        except ValueError:
+            return "日期格式不正确，请使用 now、today、tomorrow、day_after_tomorrow 或 YYYY-MM-DD。"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             coordinates = CITY_COORDINATES.get(city)
@@ -68,34 +83,75 @@ async def get_weather(city: str) -> str:
                     return f"没有找到“{city}”，请提供更具体的城市名称。"
                 location = locations[0]
 
+            # “现在”仍查询实时天气；按日期查询则请求当地时区的每日预报。
+            weather_fields = (
+                {"current": (
+                    "temperature_2m,relative_humidity_2m,"
+                    "apparent_temperature,precipitation,weather_code,wind_speed_10m"
+                )}
+                if date == "now"
+                else {
+                    "daily": (
+                        "weather_code,temperature_2m_max,temperature_2m_min,"
+                        "precipitation_sum,precipitation_probability_max"
+                    ),
+                    "forecast_days": 16,
+                }
+            )
             forecast_response = await client.get(
                 settings.weather_forecast_url,
                 params={
                     "latitude": location["latitude"],
                     "longitude": location["longitude"],
-                    "current": (
-                        "temperature_2m,relative_humidity_2m,"
-                        "apparent_temperature,precipitation,weather_code,wind_speed_10m"
-                    ),
+                    **weather_fields,
                     "timezone": "auto",
                 },
             )
             forecast_response.raise_for_status()
-            current = forecast_response.json().get("current", {})
+            forecast = forecast_response.json()
 
-        weather_name = WEATHER_CODE_NAMES.get(current.get("weather_code"), "未知天气")
+        # 两种查询都使用同一个地点名称，避免重复拼接城市信息。
         place = " ".join(
             part
             for part in [location.get("country"), location.get("admin1"), location.get("name", city)]
             if part
         )
+        # 实时查询沿用原来的字段与回答格式。
+        if date == "now":
+            current = forecast.get("current", {})
+            weather_name = WEATHER_CODE_NAMES.get(current.get("weather_code"), "未知天气")
+            return (
+                f"{place}当前天气：{weather_name}；"
+                f"气温 {current.get('temperature_2m', '未知')}°C；"
+                f"体感 {current.get('apparent_temperature', '未知')}°C；"
+                f"湿度 {current.get('relative_humidity_2m', '未知')}%；"
+                f"风速 {current.get('wind_speed_10m', '未知')} km/h；"
+                f"降水 {current.get('precipitation', '未知')} mm。"
+            )
+
+        # daily.time 是城市当地日期；按序号定位“今天/明天/后天”。
+        daily = forecast.get("daily", {})
+        available_dates = daily.get("time", [])
+        if not available_dates:
+            return "天气服务没有返回每日预报，请稍后再试。"
+        target_date = available_dates[relative_days[date]] if date in relative_days else date
+        # 具体日期必须落在接口返回的预报范围内。
+        if target_date not in available_dates:
+            return f"暂时只能查询 {available_dates[0]} 至 {available_dates[-1]} 的天气预报；历史天气和更远日期暂不支持。"
+        day_index = available_dates.index(target_date)
+        # 各个每日字段都是数组，用同一日期下标取出当天的数据。
+        def daily_value(field: str) -> str | int | float:
+            values = daily.get(field, [])
+            value = values[day_index] if day_index < len(values) else None
+            return "未知" if value is None else value
+
+        weather_name = WEATHER_CODE_NAMES.get(daily_value("weather_code"), "未知天气")
         return (
-            f"{place}当前天气：{weather_name}；"
-            f"气温 {current.get('temperature_2m', '未知')}°C；"
-            f"体感 {current.get('apparent_temperature', '未知')}°C；"
-            f"湿度 {current.get('relative_humidity_2m', '未知')}%；"
-            f"风速 {current.get('wind_speed_10m', '未知')} km/h；"
-            f"降水 {current.get('precipitation', '未知')} mm。"
+            f"{place} {target_date} 天气预报：{weather_name}；"
+            f"最高气温 {daily_value('temperature_2m_max')}°C；"
+            f"最低气温 {daily_value('temperature_2m_min')}°C；"
+            f"预计降水量 {daily_value('precipitation_sum')} mm；"
+            f"最高降水概率 {daily_value('precipitation_probability_max')}%。"
         )
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         return f"天气服务暂时不可用，请稍后再试。错误信息：{exc}"
