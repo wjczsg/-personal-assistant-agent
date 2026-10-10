@@ -80,7 +80,7 @@ class PersonalAssistantAgent:
         # 将结果记录到本次响应的工具调用列表中。
         return self._record_tool("calculator", result)
 
-    # 统一执行模型可用的工具，让计算器和时间工具共享同一条执行路径。
+    # 统一执行模型可用的工具，让所有工具共享同一条执行路径。
     async def _execute_model_tool(self, name: str, arguments: dict[str, Any]) -> str:
         # 校验工具名称，避免模型调用未开放的工具，例如添加待办。
         if name not in MODEL_TOOL_NAMES:
@@ -113,8 +113,8 @@ class PersonalAssistantAgent:
         system_message = {
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
-            # 说明五个工具各自的使用场景，帮助模型正确选择工具。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。时间管理等普通知识问题直接简洁回答。",
+            # 说明五个工具各自的使用场景和多工具任务的执行规则。
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才添加带伞待办。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
         }
         # 创建本次请求的消息列表。
         messages = [system_message]
@@ -122,7 +122,7 @@ class PersonalAssistantAgent:
         messages.extend(memory)
         # 把用户当前问题加入上下文。
         messages.append({"role": "user", "content": message})
-        # 限制工具调用轮数，防止模型异常时无限循环。
+        # 限制工具调用轮数，既支持多工具连续调用，也防止模型异常时无限循环。
         max_tool_rounds = 3
         # 按轮次请求模型，直到模型返回最终文字。
         for _ in range(max_tool_rounds):
@@ -135,7 +135,7 @@ class PersonalAssistantAgent:
                     json={
                         "model": settings.llm_model,
                         "messages": messages,
-                        # auto 允许模型选择计算器、时间工具，或者直接回答。
+                        # auto 允许模型选择工具、继续调用下一个工具，或者直接回答。
                         "tools": get_tool_definitions(MODEL_TOOL_NAMES),
                         "tool_choice": "auto",
                         "temperature": 0.7,
