@@ -11,8 +11,14 @@ from .config import settings
 from .database import get_recent_messages, save_message
 from .tool_registry import execute_tool, get_tool_definitions
 
-# 这些工具交给模型自主选择；天气仍走现有规则。
-MODEL_TOOL_NAMES = ["calculator", "get_current_time", "get_todos", "remember_todo"]
+# 这些工具都交给模型自主选择。
+MODEL_TOOL_NAMES = [
+    "calculator",
+    "get_current_time",
+    "get_todos",
+    "remember_todo",
+    "get_weather",
+]
 
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
@@ -40,22 +46,18 @@ class PersonalAssistantAgent:
         #     operator = match.group(2)
         #     b = float(match.group(3))
         #     return self._record_tool("calculator", calculator(a, b, operator))
-        # 用户询问天气时调用天气工具。
-        if any(keyword in message for keyword in ["天气", "气温", "下雨", "降温", "温度"]):
-            # 支持“查询北京天气”“北京今天的天气”等常见表达。
-            city_match = re.search(
-                r"(?:帮我)?(?:查询|查一下|查|看看|告诉我|问一下)?\s*"
-                r"([\u4e00-\u9fa5A-Za-z·]{2,20}?)\s*"
-                r"(?:今天|明天|现在|当前)?(?:的)?(?:天气|气温|温度)",
-                message,
-            )
-            # 如果没有识别出城市，就返回提示信息。
-            if not city_match:
-                return self._record_tool("get_weather", "请告诉我想查询的城市，例如：查询北京天气。")
-            # 取出正则表达式识别到的城市名称。
-            city = city_match.group(1).strip()
-            # 调用异步天气工具并记录工具结果。
-            return self._record_tool("get_weather", await execute_tool("get_weather", {"city": city}, self.user_id))
+        # 保留旧的天气关键词和正则提取逻辑供学习对照；现在由模型提取 city 参数。
+        # if any(keyword in message for keyword in ["天气", "气温", "下雨", "降温", "温度"]):
+        #     city_match = re.search(
+        #         r"(?:帮我)?(?:查询|查一下|查|看看|告诉我|问一下)?\s*"
+        #         r"([\u4e00-\u9fa5A-Za-z·]{2,20}?)\s*"
+        #         r"(?:今天|明天|现在|当前)?(?:的)?(?:天气|气温|温度)",
+        #         message,
+        #     )
+        #     if not city_match:
+        #         return self._record_tool("get_weather", "请告诉我想查询的城市，例如：查询北京天气。")
+        #     city = city_match.group(1).strip()
+        #     return self._record_tool("get_weather", await execute_tool("get_weather", {"city": city}, self.user_id))
         # 保留旧的时间关键词判断供学习对照；现在由模型决定是否调用时间工具。
         # if "几点" in message or "时间" in message or "日期" in message:
         #     return self._record_tool("get_current_time", await execute_tool("get_current_time", {}, self.user_id))
@@ -111,8 +113,8 @@ class PersonalAssistantAgent:
         system_message = {
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
-            # 说明四个工具各自的使用场景，帮助模型正确选择工具。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数。时间管理等普通知识问题直接简洁回答。",
+            # 说明五个工具各自的使用场景，帮助模型正确选择工具。
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问某个城市的天气、气温或是否下雨时调用 get_weather，并把城市名称放入 city 参数。时间管理等普通知识问题直接简洁回答。",
         }
         # 创建本次请求的消息列表。
         messages = [system_message]
@@ -194,7 +196,7 @@ class PersonalAssistantAgent:
         memory = get_recent_messages(self.user_id)
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
-        # 天气先走规则；计算器、时间、待办查询和添加待办交给模型选择。
+        # 目前所有工具都交给模型通过 Function Calling 选择。
         tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:
