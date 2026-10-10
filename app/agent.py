@@ -11,8 +11,8 @@ from .config import settings
 from .database import get_recent_messages, save_message
 from .tool_registry import execute_tool, get_tool_definitions
 
-# 只有这两个工具交给模型自主选择；天气和待办仍走现有规则。
-MODEL_TOOL_NAMES = ["calculator", "get_current_time"]
+# 这些工具交给模型自主选择；天气仍走现有规则。
+MODEL_TOOL_NAMES = ["calculator", "get_current_time", "get_todos", "remember_todo"]
 
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
@@ -59,19 +59,15 @@ class PersonalAssistantAgent:
         # 保留旧的时间关键词判断供学习对照；现在由模型决定是否调用时间工具。
         # if "几点" in message or "时间" in message or "日期" in message:
         #     return self._record_tool("get_current_time", await execute_tool("get_current_time", {}, self.user_id))
-        # 用户询问待办时读取待办工具；这个判断要放在“添加待办”之前。
-        if "我的待办" in message or "有哪些待办" in message or "待办事项" in message:
-            # 调用待办查询工具。
-            return self._record_tool("get_todos", await execute_tool("get_todos", {}, self.user_id))
-        # 用户说“记住”或“添加待办”时，把后面的内容保存起来。
-        if "记住" in message or "添加待办" in message:
-            # 去掉常见的触发词，留下真正要记住的内容。
-            content = re.sub(r"^(帮我)?(记住|添加待办)[:：\s]*", "", message).strip()
-            # 如果用户没有写内容，就返回提示。
-            if not content:
-                return self._record_tool("remember_todo", "请告诉我具体要记住什么。")
-            # 调用记事工具。
-            return self._record_tool("remember_todo", await execute_tool("remember_todo", {"content": content}, self.user_id))
+        # 保留旧的待办关键词判断供学习对照；现在由模型决定是否调用 get_todos。
+        # if "我的待办" in message or "有哪些待办" in message or "待办事项" in message:
+        #     return self._record_tool("get_todos", await execute_tool("get_todos", {}, self.user_id))
+        # 保留旧的“记住/添加待办”关键词判断供学习对照；现在由模型提取 content 参数。
+        # if "记住" in message or "添加待办" in message:
+        #     content = re.sub(r"^(帮我)?(记住|添加待办)[:：\s]*", "", message).strip()
+        #     if not content:
+        #         return self._record_tool("remember_todo", "请告诉我具体要记住什么。")
+        #     return self._record_tool("remember_todo", await execute_tool("remember_todo", {"content": content}, self.user_id))
         # 没有需要调用其他工具时返回 None。
         return None
 
@@ -101,7 +97,7 @@ class PersonalAssistantAgent:
         # 记录工具名称和结果，使前端能显示本次实际使用的工具。
         return self._record_tool(name, result)
 
-    # 调用大模型，让它理解问题，并在需要时调用计算器或时间工具。
+    # 调用大模型，让它理解问题，并在需要时调用计算器、时间或待办查询工具。
     async def _ask_llm(self, message: str, memory: list[dict[str, Any]]) -> str:
         # 没有配置 API 密钥时使用演示模式，避免初学者一开始就被配置卡住。
         if not settings.llm_api_key:
@@ -115,8 +111,8 @@ class PersonalAssistantAgent:
         system_message = {
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
-            # 要求查询当前时间时获取新结果，不使用模型记忆或历史对话中的旧时间。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间。时间管理等普通知识问题直接简洁回答。",
+            # 说明四个工具各自的使用场景，帮助模型正确选择工具。
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数。时间管理等普通知识问题直接简洁回答。",
         }
         # 创建本次请求的消息列表。
         messages = [system_message]
@@ -130,7 +126,7 @@ class PersonalAssistantAgent:
         for _ in range(max_tool_rounds):
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
-                # 从注册表读取两个工具的描述，与消息一起发送给模型。
+                # 从注册表读取当前允许使用的工具描述，与消息一起发送给模型。
                 response = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
@@ -198,7 +194,7 @@ class PersonalAssistantAgent:
         memory = get_recent_messages(self.user_id)
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
-        # 天气和待办先走规则；计算器和时间查询随后交给模型选择。
+        # 天气先走规则；计算器、时间、待办查询和添加待办交给模型选择。
         tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:
