@@ -11,6 +11,9 @@ from .config import settings
 from .database import get_recent_messages, save_message
 from .tool_registry import execute_tool, get_tool_definitions
 
+# 只有这两个工具交给模型自主选择；天气和待办仍走现有规则。
+MODEL_TOOL_NAMES = ["calculator", "get_current_time"]
+
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
     # 初始化 Agent，并保存本次对话所属的用户。
@@ -53,10 +56,9 @@ class PersonalAssistantAgent:
             city = city_match.group(1).strip()
             # 调用异步天气工具并记录工具结果。
             return self._record_tool("get_weather", await execute_tool("get_weather", {"city": city}, self.user_id))
-        # 用户询问时间时调用时间工具。
-        if "几点" in message or "时间" in message or "日期" in message:
-            # 执行时间工具并记录调用结果。
-            return self._record_tool("get_current_time", await execute_tool("get_current_time", {}, self.user_id))
+        # 保留旧的时间关键词判断供学习对照；现在由模型决定是否调用时间工具。
+        # if "几点" in message or "时间" in message or "日期" in message:
+        #     return self._record_tool("get_current_time", await execute_tool("get_current_time", {}, self.user_id))
         # 用户询问待办时读取待办工具；这个判断要放在“添加待办”之前。
         if "我的待办" in message or "有哪些待办" in message or "待办事项" in message:
             # 调用待办查询工具。
@@ -80,7 +82,26 @@ class PersonalAssistantAgent:
         # 将结果记录到本次响应的工具调用列表中。
         return self._record_tool("calculator", result)
 
-    # 调用大模型，让它理解问题，并在需要时调用计算器函数。
+    # 统一执行模型可用的工具，让计算器和时间工具共享同一条执行路径。
+    async def _execute_model_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        # 校验工具名称，避免模型调用未开放的工具，例如添加待办。
+        if name not in MODEL_TOOL_NAMES:
+            # 把错误作为工具结果返回，让模型知道这次调用没有执行。
+            return f"未开放给模型的工具：{name}"
+        # 模型的 arguments 必须解析为对象，才能作为函数参数使用。
+        if not isinstance(arguments, dict):
+            # 遇到数组或其他类型时给出明确提示。
+            return "工具参数必须是 JSON 对象。"
+        # 当前时间工具无需任何参数；其他工具的参数继续由原函数处理。
+        if name == "get_current_time" and arguments:
+            # 拒绝城市、时区等当前时间工具并不支持的参数。
+            return "get_current_time 不需要参数，请传入空对象 {}。"
+        # 从注册表找到真实函数，并等待执行结果。
+        result = await execute_tool(name, arguments, self.user_id)
+        # 记录工具名称和结果，使前端能显示本次实际使用的工具。
+        return self._record_tool(name, result)
+
+    # 调用大模型，让它理解问题，并在需要时调用计算器或时间工具。
     async def _ask_llm(self, message: str, memory: list[dict[str, Any]]) -> str:
         # 没有配置 API 密钥时使用演示模式，避免初学者一开始就被配置卡住。
         if not settings.llm_api_key:
@@ -90,12 +111,12 @@ class PersonalAssistantAgent:
             return f"演示模式回答：我收到了“{message}”。最近记忆：{memory_text or '暂时没有历史记录'}"
         # 拼出兼容 OpenAI Chat Completions 的接口地址。
         url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
-        # 给模型一个明确的系统角色，说明它可以使用计算器。
+        # 给模型一个明确的系统角色，说明两个工具各自的使用场景。
         system_message = {
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
-            # 告诉模型计算问题应该优先使用计算器工具。
-            "content": "你是一个友好的中文个人助理。遇到需要精确计算的问题，请调用 calculator 工具；普通问题直接简洁回答。",
+            # 要求查询当前时间时获取新结果，不使用模型记忆或历史对话中的旧时间。
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间。时间管理等普通知识问题直接简洁回答。",
         }
         # 创建本次请求的消息列表。
         messages = [system_message]
@@ -109,14 +130,15 @@ class PersonalAssistantAgent:
         for _ in range(max_tool_rounds):
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
-                # 将消息和计算器工具描述发送给大模型。
+                # 从注册表读取两个工具的描述，与消息一起发送给模型。
                 response = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                     json={
                         "model": settings.llm_model,
                         "messages": messages,
-                        "tools": get_tool_definitions(["calculator"]),
+                        # auto 允许模型选择计算器、时间工具，或者直接回答。
+                        "tools": get_tool_definitions(MODEL_TOOL_NAMES),
                         "tool_choice": "auto",
                         "temperature": 0.7,
                     },
@@ -141,15 +163,21 @@ class PersonalAssistantAgent:
                 function_name = tool_call["function"]["name"]
                 # 读取模型生成的 JSON 参数字符串。
                 arguments_text = tool_call["function"].get("arguments", "{}")
-                # 把 JSON 参数字符串解析成 Python 字典。
-                arguments = json.loads(arguments_text)
-                # 当前只允许执行我们明确提供的 calculator 工具。
-                if function_name != "calculator":
-                    # 未知工具不应该被执行，返回错误结果给模型。
-                    tool_result = f"未知工具：{function_name}"
-                else:
-                    # 执行计算器并记录工具调用结果。
-                    tool_result = await self._execute_calculator_tool(arguments)
+                # 保留旧的仅计算器分支作为注释，方便对照统一执行流程。
+                # if function_name != "calculator":
+                #     tool_result = f"未知工具：{function_name}"
+                # else:
+                #     tool_result = await self._execute_calculator_tool(arguments)
+                # 捕获模型的参数错误，把错误交回模型而不是让请求直接失败。
+                try:
+                    # 将 JSON 参数文本转成 Python 对象；时间工具通常返回空对象 {}。
+                    arguments = json.loads(arguments_text)
+                    # 按名称通过注册表执行工具，并记录实际调用结果。
+                    tool_result = await self._execute_model_tool(function_name, arguments)
+                # JSON 错误、缺失参数和类型错误都属于可反馈给模型的参数问题。
+                except (ValueError, KeyError, TypeError) as exc:
+                    # 模型下一轮可以根据这个结果修正参数。
+                    tool_result = f"工具参数错误：{exc}"
                 # 把工具执行结果以 tool 消息放回对话上下文。
                 messages.append(
                     {
@@ -170,7 +198,7 @@ class PersonalAssistantAgent:
         memory = get_recent_messages(self.user_id)
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
-        # 尝试调用天气、时间和待办工具。
+        # 天气和待办先走规则；计算器和时间查询随后交给模型选择。
         tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:

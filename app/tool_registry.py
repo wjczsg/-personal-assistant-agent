@@ -14,7 +14,7 @@ ToolHandler = Callable[[dict[str, Any], str], str | Awaitable[str]]
 
 
 # 给模型看的工具描述列表。
-# 目前 Agent 只把 calculator 发送给模型，其他工具先保留在注册表中，方便后续升级。
+# 目前 Agent 把 calculator 和 get_current_time 发送给模型，其他工具先保留供后续升级。
 TOOL_DEFINITIONS = [
     {
         # 告诉模型：这是一个函数工具。
@@ -54,7 +54,7 @@ TOOL_DEFINITIONS = [
             # 当前时间工具的名字。
             "name": "get_current_time",
             # 当前时间工具不需要参数。
-            "description": "获取当前日期和时间。",
+            "description": "获取服务器本地的当前日期和时间，用于回答现在几点、今天几号或星期几等问题。无需参数；不支持指定城市或时区。",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
