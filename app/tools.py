@@ -4,6 +4,7 @@ import httpx
 
 from .config import settings
 from .database import add_todo, list_todos, save_memory_record
+from .vector_store import index_memory
 
 
 WEATHER_CODE_NAMES = {
@@ -191,6 +192,18 @@ def save_memory(user_id: str, content: str, memory_type: str) -> str:
 
     # 通过数据库层保存记忆，工具层不直接编写 SQL。
     memory = save_memory_record(user_id, content, memory_type)
+
+    # 把同一条记忆同步写入 Chroma，后续才能按语义检索它。
+    try:
+        index_memory(
+            memory_id=memory["id"],
+            user_id=memory["user_id"],
+            content=memory["content"],
+            memory_type=memory["memory_type"],
+        )
+    except Exception as exc:
+        # SQLite 中的原始记忆已经保存；向量索引失败时保留主流程结果并提示原因。
+        return f"已保存长期记忆，但 Chroma 向量索引失败：{exc}"
 
     # 把数据库生成的编号和保存内容返回给调用方。
     return f"已保存{memory['memory_type']}类型的长期记忆 #{memory['id']}：{memory['content']}"

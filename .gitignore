@@ -15,6 +15,7 @@ env/
 *.db
 *.sqlite
 *.sqlite3
+chroma_data/
 
 # IDE 配置
 .idea/

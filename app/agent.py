@@ -1,3 +1,5 @@
+# 导入 asyncio，用线程执行同步的 Chroma 检索，避免阻塞异步请求。
+import asyncio
 # 导入 json，用来读取大模型返回的 JSON 内容。
 import json
 # 导入 re，用来从用户文字中识别待办内容。
@@ -10,6 +12,7 @@ from typing import Any
 from .config import settings
 from .database import get_recent_messages, save_message
 from .tool_registry import execute_tool, get_tool_definitions
+from .vector_store import search_memories
 
 # 这些工具都交给模型自主选择。
 MODEL_TOOL_NAMES = [
@@ -36,6 +39,20 @@ class PersonalAssistantAgent:
         self.tool_calls.append({"name": name, "result": result})
         # 把结果继续交给后续回答流程。
         return result
+
+    # 从 Chroma 检索与当前问题相关的长期记忆。
+    async def _get_relevant_memories(self, message: str) -> list[dict[str, Any]]:
+        # Chroma 当前使用同步 API；放到线程中执行，避免阻塞 FastAPI 的异步事件循环。
+        try:
+            return await asyncio.to_thread(
+                search_memories,
+                self.user_id,
+                message,
+                3,
+            )
+        # 向量数据库暂时不可用时，继续进行普通对话，不让记忆功能拖垮 Agent。
+        except Exception:
+            return []
 
     # 根据用户文字做几个适合初学者的工具调用判断。
     async def _try_tools(self, message: str) -> str | None:
@@ -119,6 +136,25 @@ class PersonalAssistantAgent:
         }
         # 创建本次请求的消息列表。
         messages = [system_message]
+        # 从 Chroma 查询与当前问题语义相关的长期记忆。
+        relevant_memories = await self._get_relevant_memories(message)
+        # 只有检索到长期记忆时，才额外加入长期记忆上下文。
+        if relevant_memories:
+            # 把每条记忆整理成模型容易理解的文本。
+            memory_lines = [
+                f"- ({item.get('memory_type', 'unknown')}) {item['content']}"
+                for item in relevant_memories
+            ]
+            # 把长期记忆作为独立的系统消息加入上下文。
+            messages.append({
+                "role": "system",
+                "content": (
+                    "以下是从当前用户的长期记忆库中检索到的相关信息，"
+                    "只能作为回答参考；如果与用户当前明确表达的内容冲突，"
+                    "以当前问题为准：\n"
+                    + "\n".join(memory_lines)
+                ),
+            })
         # 把数据库中的历史消息加入上下文。
         messages.extend(memory)
         # 把用户当前问题加入上下文。
