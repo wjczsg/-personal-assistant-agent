@@ -118,6 +118,37 @@ def list_todos(user_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+# 按编号把当前用户的一条待办标记为完成。
+def mark_todo_done(user_id: str, todo_id: int) -> dict[str, Any] | None:
+    # 打开 SQLite 连接；没有找到当前用户的这条待办时返回 None。
+    connection = get_connection()
+    try:
+        # 在同一个事务里先检查待办，再更新其完成状态。
+        with connection:
+            # 必须同时匹配待办编号和用户编号，不能改动其他用户的待办。
+            row = connection.execute(
+                "SELECT id, content, done FROM todos WHERE id = ? AND user_id = ?",
+                (todo_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            # 重复完成同一条待办时，不再执行更新，但清楚地告知调用方。
+            if row["done"]:
+                return {"id": row["id"], "content": row["content"], "already_done": True}
+
+            # 只更新当前用户的这一条未完成待办；done=1 代表已完成。
+            connection.execute(
+                "UPDATE todos SET done = 1 WHERE id = ? AND user_id = ? AND done = 0",
+                (todo_id, user_id),
+            )
+            # 返回编号和内容，让工具层可以组织用户看得懂的反馈。
+            return {"id": row["id"], "content": row["content"], "already_done": False}
+    finally:
+        # 无论找到待办与否，都关闭数据库连接。
+        connection.close()
+
+
 # 保存一条长期记忆。
 def save_memory_record(user_id: str, content: str, memory_type: str) -> dict[str, Any]:
     # 打开数据库连接。

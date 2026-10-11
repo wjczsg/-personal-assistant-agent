@@ -3,7 +3,7 @@ from datetime import date as calendar_date, datetime
 import httpx
 
 from .config import settings
-from .database import add_todo, list_todos, save_memory_record
+from .database import add_todo, list_todos, mark_todo_done, save_memory_record
 from .vector_store import index_memory
 
 
@@ -168,6 +168,22 @@ def get_todos(user_id: str) -> str:
     if not todos:
         return "目前没有未完成的待办事项。"
     return "\n".join(f"#{todo['id']}：{todo['content']}" for todo in todos)
+
+
+def complete_todo(user_id: str, todo_id: int) -> str:
+    """按编号完成一条属于当前用户的待办。"""
+    # 编号必须是正整数；bool 在 Python 中也属于 int，这里明确排除。
+    if type(todo_id) is not int or todo_id <= 0:
+        return "完成待办失败：待办编号必须是正整数。"
+
+    # 数据库层负责查找并更新，工具层只负责参数检查和组织反馈。
+    todo = mark_todo_done(user_id, todo_id)
+    if todo is None:
+        # 不暴露其他用户是否存在同编号待办，统一提示“未找到”。
+        return f"没有找到你的待办 #{todo_id}，请先查询待办列表确认编号。"
+    if todo["already_done"]:
+        return f"待办 #{todo_id} 已经完成了：{todo['content']}"
+    return f"已完成待办 #{todo_id}：{todo['content']}"
 
 
 def save_memory(user_id: str, content: str, memory_type: str) -> str:

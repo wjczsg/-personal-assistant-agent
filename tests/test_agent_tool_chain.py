@@ -97,6 +97,55 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed_tools[1][1], {"content": "出门带伞"})
         self.assertIn("已经帮你添加", answer)
 
+    async def test_lookup_todo_before_marking_it_complete(self):
+        # 用户只说待办内容时，模型先查询列表，不能自行猜测编号。
+        lookup_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "lookup-todo-1",
+                "type": "function",
+                "function": {"name": "get_todos", "arguments": "{}"},
+            }],
+        }
+        # 读到唯一匹配的 #5 后，第二轮才调用完成工具。
+        complete_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "complete-todo-1",
+                "type": "function",
+                "function": {
+                    "name": "complete_todo",
+                    "arguments": json.dumps({"todo_id": 5}),
+                },
+            }],
+        }
+        final_answer = {"role": "assistant", "content": "整理简历这项待办已经完成。"}
+        client = FakeAsyncClient([
+            FakeResponse(lookup_call),
+            FakeResponse(complete_call),
+            FakeResponse(final_answer),
+        ])
+        executed_tools = []
+
+        async def fake_execute_tool(name, arguments, user_id):
+            # 模拟工具结果，检查 Agent 的调用顺序而不修改真实数据库。
+            executed_tools.append((name, arguments, user_id))
+            if name == "get_todos":
+                return "#5：整理简历"
+            return "已完成待办 #5：整理简历"
+
+        agent = PersonalAssistantAgent("test-user")
+        with patch("app.agent.settings.llm_api_key", "test-key"), \
+                patch("app.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+            answer = await agent._ask_llm("我完成了整理简历", [])
+
+        self.assertEqual([item[0] for item in executed_tools], ["get_todos", "complete_todo"])
+        self.assertEqual(executed_tools[1][1], {"todo_id": 5})
+        self.assertIn("已经完成", answer)
+
 
 if __name__ == "__main__":
     unittest.main()

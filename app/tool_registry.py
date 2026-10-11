@@ -5,9 +5,13 @@ import inspect
 # 导入 Any，表示工具参数和返回数据可以有多种类型。
 from typing import Any, Awaitable, Callable
 
+# LangChain 的 @tool 会把普通 Python 函数包装成带参数校验的工具。
+from langchain_core.tools import tool
+
 # 导入真正执行工作的工具函数。
 from .tools import (
     calculator,
+    complete_todo,
     get_current_time,
     get_todos,
     get_weather,
@@ -20,8 +24,18 @@ from .tools import (
 ToolHandler = Callable[[dict[str, Any], str], str | Awaitable[str]]
 
 
+# 只拿计算器做 LangChain 入门示例：原来的 calculator 函数仍负责真正的计算。
+# @tool("calculator") 把下面的函数包装为名为 calculator 的 LangChain 工具。
+@tool("calculator")
+def langchain_calculator(a: float, b: float, operator: str) -> str:
+    """计算两个数字的加减乘除。"""
+    # a、b 和 operator 的类型标注会被 LangChain 用来建立参数结构。
+    # 这里复用已有函数，不改写加减乘除和除零判断。
+    return calculator(a, b, operator)
+
+
 # 给模型看的工具描述列表。
-# Agent 从这里读取全部五个工具的描述，再交给模型选择。
+# Agent 从这里读取当前开放的工具描述，再交给模型选择。
 TOOL_DEFINITIONS = [
     {
         # 告诉模型：这是一个函数工具。
@@ -97,6 +111,22 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        # 告诉模型如何按编号完成一条已有的待办，而不是新建待办。
+        "type": "function",
+        "function": {
+            "name": "complete_todo",
+            "description": "按编号将当前用户的一条待办标记为完成。需要先确认待办编号；只有文字描述时先调用 get_todos，不要猜测编号。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    # todo_id 是待办列表中显示的 # 后面的正整数。
+                    "todo_id": {"type": "integer", "minimum": 1, "description": "要完成的待办编号"},
+                },
+                "required": ["todo_id"],
+            },
+        },
+    },
+    {
         # 注册天气工具的模型描述。
         "type": "function",
         "function": {
@@ -154,14 +184,14 @@ TOOL_DEFINITIONS = [
 
 # 计算器工具的执行函数。
 async def _run_calculator(arguments: dict[str, Any], user_id: str) -> str:
-    # 读取并转换第一个数字。
-    a = float(arguments["a"])
-    # 读取并转换第二个数字。
-    b = float(arguments["b"])
-    # 读取运算符。
-    operator = str(arguments["operator"])
-    # 执行原有的计算器函数。
-    return calculator(a, b, operator)
+    # 旧方案：注册表自己取参数、转换类型，再直接调用普通函数。
+    # a = float(arguments["a"])
+    # b = float(arguments["b"])
+    # operator = str(arguments["operator"])
+    # return calculator(a, b, operator)
+    # 新方案：把模型给出的参数字典交给 LangChain 工具，由它校验并执行。
+    # ainvoke 是异步调用形式，适合当前工具注册表的异步执行流程。
+    return await langchain_calculator.ainvoke(arguments)
 
 
 # 当前时间工具的执行函数。
@@ -182,6 +212,14 @@ async def _run_remember_todo(arguments: dict[str, Any], user_id: str) -> str:
     content = str(arguments["content"])
     # 使用当前用户编号保存待办。
     return remember_todo(user_id, content)
+
+
+# 待办完成工具的执行函数。
+async def _run_complete_todo(arguments: dict[str, Any], user_id: str) -> str:
+    # 编号由模型提供，用户编号则由 Agent 传入，避免模型自行指定用户。
+    todo_id = arguments.get("todo_id")
+    # 具体的参数校验和数据库更新交给工具层处理。
+    return complete_todo(user_id, todo_id)
 
 
 # 天气工具的执行函数。
@@ -215,6 +253,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "get_todos": _run_get_todos,
     # 注册待办添加执行函数。
     "remember_todo": _run_remember_todo,
+    # 注册待办完成执行函数。
+    "complete_todo": _run_complete_todo,
     # 注册天气执行函数。
     "get_weather": _run_weather,
     # 注册长期记忆执行函数。

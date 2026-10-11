@@ -20,6 +20,7 @@ MODEL_TOOL_NAMES = [
     "get_current_time",
     "get_todos",
     "remember_todo",
+    "complete_todo",
     "get_weather",
     "save_memory",
 ]
@@ -100,7 +101,7 @@ class PersonalAssistantAgent:
 
     # 统一执行模型可用的工具，让所有工具共享同一条执行路径。
     async def _execute_model_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        # 校验工具名称，避免模型调用未开放的工具，例如添加待办。
+        # 校验工具名称，避免模型调用未开放的工具。
         if name not in MODEL_TOOL_NAMES:
             # 把错误作为工具结果返回，让模型知道这次调用没有执行。
             return f"未开放给模型的工具：{name}"
@@ -117,7 +118,7 @@ class PersonalAssistantAgent:
         # 记录工具名称和结果，使前端能显示本次实际使用的工具。
         return self._record_tool(name, result)
 
-    # 调用大模型，让它理解问题，并在需要时调用计算器、时间或待办查询工具。
+    # 调用大模型，让它理解问题，并在需要时选择已注册的工具。
     async def _ask_llm(self, message: str, memory: list[dict[str, Any]]) -> str:
         # 没有配置 API 密钥时使用演示模式，避免初学者一开始就被配置卡住。
         if not settings.llm_api_key:
@@ -127,13 +128,19 @@ class PersonalAssistantAgent:
             return f"演示模式回答：我收到了“{message}”。最近记忆：{memory_text or '暂时没有历史记录'}"
         # 拼出兼容 OpenAI Chat Completions 的接口地址。
         url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
-        # 给模型一个明确的系统角色，说明两个工具各自的使用场景。
+        # 给模型一个明确的系统角色，说明工具各自的使用场景。
         system_message = {
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
-            # 说明五个工具各自的使用场景和多工具任务的执行规则。
+            # 说明现有工具各自的使用场景和多工具任务的执行规则。
             "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才添加带伞待办。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
         }
+        # 完成待办是修改已有记录：必须先确定编号，不能把“完成了”当成新增待办。
+        system_message["content"] += (
+            "用户要求标记完成待办时，如果给出了明确编号，调用 complete_todo，并把编号放入 todo_id；"
+            "如果只给出待办内容，先调用 get_todos 查看未完成列表，只有唯一匹配时才用对应编号调用 complete_todo；"
+            "找不到或无法唯一确定时，先询问用户，不要猜测编号，也不要创建新待办。"
+        )
         # 创建本次请求的消息列表。
         messages = [system_message]
         # 从 Chroma 查询与当前问题语义相关的长期记忆。
