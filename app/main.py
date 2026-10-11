@@ -1,13 +1,14 @@
 ﻿# 从 FastAPI 导入创建 Web 应用所需的类。
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
 from .agent import PersonalAssistantAgent
-from .database import init_database, save_document
-from .schemas import ChatRequest, ChatResponse, DocumentUploadResponse, ToolCall
+from .database import get_document, init_database, save_document
+from .document_chunking import split_document_text
+from .schemas import ChatRequest, ChatResponse, DocumentChunk, DocumentChunksResponse, DocumentUploadResponse, ToolCall
 
 # 创建 FastAPI 应用对象；它会自动生成 /docs 接口文档。
 app = FastAPI(
@@ -75,6 +76,26 @@ async def upload_document(
         document_id=document_id,
         filename=filename,
         char_count=len(content),
+    )
+
+
+@app.get("/api/documents/{document_id}/chunks", response_model=DocumentChunksResponse, summary="预览文档分块")
+def preview_document_chunks(document_id: int, user_id: str = Query(...)) -> DocumentChunksResponse:
+    """按需分块并返回结果；这一阶段不写入向量数据库。"""
+    if not user_id.strip():
+        raise HTTPException(status_code=400, detail="用户 ID 不能为空")
+    document = get_document(user_id.strip(), document_id)
+    if document is None:
+        # 不区分“文档不存在”和“属于别的用户”，避免泄露其他用户的文档编号。
+        raise HTTPException(status_code=404, detail="未找到该文档")
+
+    # 每次从原文计算分块，方便此阶段调整切分规则，不重复存储片段。
+    pieces = split_document_text(document["content"])
+    return DocumentChunksResponse(
+        document_id=document_id,
+        filename=document["filename"],
+        chunk_count=len(pieces),
+        chunks=[DocumentChunk(index=index, content=piece) for index, piece in enumerate(pieces, start=1)],
     )
 
 # 对话接口；前端或其他程序通过 POST 请求发送消息。

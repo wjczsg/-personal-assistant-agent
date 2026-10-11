@@ -81,6 +81,20 @@ def save_document(user_id: str, filename: str, content: str) -> int:
         # 保存成功或失败都关闭连接，避免占用数据库文件。
         connection.close()
 
+
+def get_document(user_id: str, document_id: int) -> dict[str, Any] | None:
+    """按用户和文档编号读取原文；找不到时返回 None。"""
+    connection = get_connection()
+    try:
+        # 两个条件都必须满足，不能只凭文档编号读取其他用户的文件。
+        row = connection.execute(
+            "SELECT id, filename, content FROM documents WHERE id = ? AND user_id = ?",
+            (document_id, user_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        connection.close()
+
 # 保存一条对话消息。
 def save_message(user_id: str, role: str, content: str) -> None:
     # 打开数据库连接。
