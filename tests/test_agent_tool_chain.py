@@ -195,6 +195,55 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed_tools[1][1], {"todo_id": 5})
         self.assertIn("已经删除", answer)
 
+    async def test_lookup_all_todos_before_updating_by_content(self):
+        # 用模拟的模型响应验证 Agent 能先查编号，再把完整新文字交给修改工具。
+        lookup_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "lookup-todo-for-update",
+                "type": "function",
+                "function": {"name": "get_todos", "arguments": json.dumps({"status": "all"})},
+            }],
+        }
+        update_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "update-todo-after-lookup",
+                "type": "function",
+                "function": {
+                    "name": "update_todo",
+                    "arguments": json.dumps({"todo_id": 5, "new_content": "周日完善简历"}),
+                },
+            }],
+        }
+        final_answer = {"role": "assistant", "content": "已把整理简历改成周日完善简历。"}
+        client = FakeAsyncClient([
+            FakeResponse(lookup_call),
+            FakeResponse(update_call),
+            FakeResponse(final_answer),
+        ])
+        executed_tools = []
+
+        async def fake_execute_tool(name, arguments, user_id):
+            # 模拟工具结果，不写入项目真实的数据库。
+            executed_tools.append((name, arguments, user_id))
+            if name == "get_todos":
+                return "#5 [未完成]：整理简历"
+            return "已修改待办 #5：整理简历 → 周日完善简历"
+
+        agent = PersonalAssistantAgent("test-user")
+        with patch("app.agent.settings.llm_api_key", "test-key"), \
+                patch("app.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+            answer = await agent._ask_llm("把整理简历改成周日完善简历", [])
+
+        self.assertEqual([item[0] for item in executed_tools], ["get_todos", "update_todo"])
+        self.assertEqual(executed_tools[0][1], {"status": "all"})
+        self.assertEqual(executed_tools[1][1], {"todo_id": 5, "new_content": "周日完善简历"})
+        self.assertIn("周日完善简历", answer)
+
 
 if __name__ == "__main__":
     unittest.main()

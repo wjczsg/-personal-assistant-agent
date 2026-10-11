@@ -22,6 +22,7 @@ MODEL_TOOL_NAMES = [
     "remember_todo",
     "complete_todo",
     "delete_todo",
+    "update_todo",
     "get_weather",
     "save_memory",
 ]
@@ -154,6 +155,12 @@ class PersonalAssistantAgent:
             "用户明确要求删除待办时才调用 delete_todo；"
             "若没有明确编号，先调用 get_todos 并传 status=all，只有唯一匹配时才删除；"
             "找不到或有多个可能时先询问用户，绝不猜编号，也不要把标记完成当成删除。"
+        )
+        # 修改待办只改变已有记录的文字；没有目标编号或新文字时不能执行。
+        system_message["content"] += (
+            "用户明确要求改写已有待办内容时调用 update_todo，传 todo_id 和完整 new_content；"
+            "若只给旧内容，先用 get_todos(status=all) 查找，唯一匹配后再修改；"
+            "目标或新内容不明确时先询问用户，不要猜编号，也不要新建待办。"
         )
         # 创建本次请求的消息列表。
         messages = [system_message]

@@ -3,7 +3,7 @@ from datetime import date as calendar_date, datetime
 import httpx
 
 from .config import settings
-from .database import add_todo, delete_todo_record, list_todos, mark_todo_done, save_memory_record
+from .database import add_todo, delete_todo_record, list_todos, mark_todo_done, save_memory_record, update_todo_content
 from .vector_store import index_memory
 
 
@@ -224,6 +224,29 @@ def delete_todo(user_id: str, todo_id: int) -> str:
         return f"没有找到你的待办 #{todo_id}，请先查询全部待办确认编号。"
     # 删除是永久移除记录，不等于把 done 改为 1。
     return f"已删除待办 #{deleted['id']}：{deleted['content']}"
+
+
+def update_todo(user_id: str, todo_id: int, new_content: str) -> str:
+    """按编号修改当前用户的待办文字，不改变其完成状态。"""
+    # bool 在 Python 中也是 int 的子类，这里要求编号必须是严格的正整数。
+    if type(todo_id) is not int or todo_id <= 0:
+        return "修改待办失败：待办编号必须是正整数。"
+    # 模型可能传入空值或数字；只有非空字符串才能作为新的待办内容。
+    if not isinstance(new_content, str) or not new_content.strip():
+        return "修改待办失败：新的待办内容不能为空。"
+
+    # 去掉首尾空格，避免保存“  整理简历  ”这样的无意空白。
+    cleaned_content = new_content.strip()
+    # 数据库层负责用户隔离和真正的 UPDATE；工具层只检查参数并组织回复。
+    todo = update_todo_content(user_id, todo_id, cleaned_content)
+    if todo is None:
+        # 不透露这个编号是否属于别人，统一提示当前用户没有找到。
+        return f"没有找到你的待办 #{todo_id}，请先查询全部待办确认编号。"
+    if not todo["changed"]:
+        # 新内容与原内容完全相同，不把未发生的修改说成成功修改。
+        return f"待办 #{todo_id} 的内容没有变化：{todo['content']}"
+    # 给用户展示修改前后文字，方便核对模型是否改对了目标。
+    return f"已修改待办 #{todo_id}：{todo['old_content']} → {todo['content']}"
 
 
 def save_memory(user_id: str, content: str, memory_type: str) -> str:

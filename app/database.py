@@ -194,6 +194,40 @@ def delete_todo_record(user_id: str, todo_id: int) -> dict[str, Any] | None:
         connection.close()
 
 
+# 按编号修改当前用户的一条待办内容；不改变 done 字段表示的完成状态。
+def update_todo_content(user_id: str, todo_id: int, new_content: str) -> dict[str, Any] | None:
+    # 返回 None 表示当前用户没有这个编号的待办；其他用户的记录也按“未找到”处理。
+    connection = get_connection()
+    try:
+        # 查询和修改放在同一个事务块，异常时 SQLite 会回滚本次更新。
+        with connection:
+            # 同时用 id 和 user_id 定位记录，不能只凭编号读取其他用户的内容。
+            row = connection.execute(
+                "SELECT id, content, done FROM todos WHERE id = ? AND user_id = ?",
+                (todo_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            # 新旧内容相同就不执行 UPDATE，但仍返回这条记录供工具层说明情况。
+            if row["content"] == new_content:
+                return {"id": row["id"], "old_content": row["content"], "content": new_content, "done": row["done"], "changed": False}
+
+            # SQL 只修改 content；WHERE 再次限制 user_id，done 和 created_at 保持原样。
+            cursor = connection.execute(
+                "UPDATE todos SET content = ? WHERE id = ? AND user_id = ?",
+                (new_content, todo_id, user_id),
+            )
+            # 如果记录在查询后已被其他请求移除，不误报为修改成功。
+            if cursor.rowcount != 1:
+                return None
+            # 返回修改前后内容，工具层可以生成清楚的确认消息。
+            return {"id": row["id"], "old_content": row["content"], "content": new_content, "done": row["done"], "changed": True}
+    finally:
+        # 无论成功、未找到还是出现异常，都关闭数据库连接。
+        connection.close()
+
+
 # 保存一条长期记忆。
 def save_memory_record(user_id: str, content: str, memory_type: str) -> dict[str, Any]:
     # 打开数据库连接。

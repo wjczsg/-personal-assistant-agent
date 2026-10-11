@@ -18,6 +18,7 @@ from .tools import (
     get_weather,
     remember_todo,
     save_memory,
+    update_todo,
 )
 
 
@@ -160,6 +161,26 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        # 编辑已有待办与新建、标记完成、删除都不同：只更改 content 字段。
+        "type": "function",
+        "function": {
+            # 名称与下面 TOOL_HANDLERS 的键保持一致，模型才能找到执行函数。
+            "name": "update_todo",
+            "description": "仅在用户明确要求修改已有待办的文字时，按编号修改当前用户待办的内容，完成状态不变。没有编号时先调用 get_todos(status='all') 查找；只有唯一匹配才修改。无法确定目标或新内容时先询问用户，不要猜编号或新建待办。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    # todo_id 是待办列表中 # 后面的正整数，不能根据文字猜测。
+                    "todo_id": {"type": "integer", "minimum": 1, "description": "要修改的待办编号"},
+                    # new_content 是用户希望替换成的完整新文字，而非待办的旧文字。
+                    "new_content": {"type": "string", "description": "修改后的完整待办内容，不能为空"},
+                },
+                # 修改目标和新内容都必须明确，不能用空参数执行修改。
+                "required": ["todo_id", "new_content"],
+            },
+        },
+    },
+    {
         # 注册天气工具的模型描述。
         "type": "function",
         "function": {
@@ -265,6 +286,15 @@ async def _run_delete_todo(arguments: dict[str, Any], user_id: str) -> str:
     return delete_todo(user_id, todo_id)
 
 
+# 注册表适配函数：把模型提供的编号和新内容交给真正的待办工具。
+async def _run_update_todo(arguments: dict[str, Any], user_id: str) -> str:
+    # 用 get 读取参数：缺少任一参数时由工具层返回可读的校验错误。
+    todo_id = arguments.get("todo_id")
+    new_content = arguments.get("new_content")
+    # user_id 来自 Agent 当前会话，不允许模型指定要修改哪个用户的数据。
+    return update_todo(user_id, todo_id, new_content)
+
+
 # 天气工具的执行函数。
 async def _run_weather(arguments: dict[str, Any], user_id: str) -> str:
     # 读取模型或其他调用方传入的城市名称。
@@ -300,6 +330,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "complete_todo": _run_complete_todo,
     # 注册待办删除执行函数；名称须与给模型看的工具定义一致。
     "delete_todo": _run_delete_todo,
+    # 注册修改待办的执行函数，名称必须和模型看到的工具名称相同。
+    "update_todo": _run_update_todo,
     # 注册天气执行函数。
     "get_weather": _run_weather,
     # 注册长期记忆执行函数。
