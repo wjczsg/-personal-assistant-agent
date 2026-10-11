@@ -42,8 +42,10 @@ class DocumentUploadTests(unittest.TestCase):
         self.assertIn('id="uploadForm"', response.text)
         self.assertNotIn('id="previewChunksButton"', response.text)
         self.assertNotIn('id="chunkPreview"', response.text)
-        self.assertIn('/static/app.js?v=document-index-1', response.text)
-        self.assertIn('/static/style.css?v=document-upload-2', response.text)
+        self.assertNotIn('id="documentSearchForm"', response.text)
+        self.assertNotIn('id="documentSearchResults"', response.text)
+        self.assertIn('/static/app.js?v=document-search-removed-1', response.text)
+        self.assertIn('/static/style.css?v=document-search-removed-1', response.text)
         # OpenAPI 接口列表里也不再提供专门的分块预览接口。
         paths = self.client.get("/openapi.json").json()["paths"]
         self.assertNotIn("/api/documents/{document_id}/chunks", paths)

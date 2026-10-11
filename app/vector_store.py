@@ -81,6 +81,46 @@ def index_document_chunks(
     return len(chunks)
 
 
+def search_document_chunks(
+    user_id: str,
+    query: str,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """在当前用户已索引的文档片段中，按问题的语义寻找相关原文。"""
+    # 没有任何文档片段时直接返回空列表，避免对空集合发起向量查询。
+    total = _document_collection.count()
+    if total == 0:
+        return []
+
+    # query_texts 会由 Chroma 转为向量；where 保证只返回当前用户的片段。
+    # n_results 不能超过集合中的总记录数，但实际命中数可能更少。
+    result = _document_collection.query(
+        query_texts=[query],
+        n_results=min(limit, total),
+        where={"user_id": user_id},
+        include=["documents", "metadatas", "distances"],
+    )
+
+    # Chroma 支持一次查询多个问题，因此结果是两层列表；[0] 取本次的问题。
+    ids = result.get("ids", [[]])[0]
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+    # 把 Chroma 的原始结构整理成接口和网页容易使用的字段。
+    return [
+        {
+            "id": chunk_id,
+            "content": content,
+            "document_id": metadata["document_id"],
+            "filename": metadata["filename"],
+            "chunk_index": metadata["chunk_index"],
+            # 距离越小通常越接近；这里不设置未经验证的相关性阈值。
+            "distance": distances[index],
+        }
+        for index, (chunk_id, content, metadata) in enumerate(zip(ids, documents, metadatas))
+    ]
+
+
 # 定义一个把长期记忆写入 Chroma 的函数。
 def index_memory(
     # SQLite 中生成的记忆编号，用来作为 Chroma 中的唯一 ID。

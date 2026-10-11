@@ -19,6 +19,11 @@ class FakeDocumentCollection:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict] = {}
+        self.last_query: dict | None = None
+
+    def count(self) -> int:
+        # 检索前先查看集合是否为空，与真实 Chroma 的 count 行为一致。
+        return len(self.rows)
 
     def get(self, *, where: dict, include: list) -> dict:
         # 模拟按文档编号寻找旧片段，供重新索引时清理多余 ID。
@@ -37,6 +42,25 @@ class FakeDocumentCollection:
     def delete(self, *, ids: list[str]) -> None:
         for key in ids:
             self.rows.pop(key, None)
+
+    def query(self, *, query_texts: list[str], n_results: int, where: dict, include: list) -> dict:
+        # 假集合不计算向量，只验证查询确实按 user_id 过滤，并返回约定的结构。
+        self.last_query = {
+            "query_texts": query_texts,
+            "n_results": n_results,
+            "where": where,
+            "include": include,
+        }
+        matches = [
+            (key, row) for key, row in self.rows.items()
+            if row["metadata"]["user_id"] == where["user_id"]
+        ][:n_results]
+        return {
+            "ids": [[key for key, _ in matches]],
+            "documents": [[row["content"] for _, row in matches]],
+            "metadatas": [[row["metadata"] for _, row in matches]],
+            "distances": [[0.2 for _ in matches]],
+        }
 
 
 class DocumentIndexingTests(unittest.TestCase):
@@ -64,6 +88,12 @@ class DocumentIndexingTests(unittest.TestCase):
         return self.client.post(
             f"/api/documents/{document_id}/index",
             json={"user_id": user_id},
+        )
+
+    def search(self, query: str, user_id: str = "alice"):
+        return self.client.post(
+            "/api/documents/search",
+            json={"user_id": user_id, "query": query},
         )
 
     def test_document_collection_is_separate_from_memories(self) -> None:
@@ -139,6 +169,46 @@ class DocumentIndexingTests(unittest.TestCase):
             self.assertEqual(row["content"], "原文仍然存在")
         finally:
             connection.close()
+
+    def test_search_returns_original_chunk_and_source_for_current_user(self) -> None:
+        # 索引两个用户的文档；alice 检索时不能看到 bob 的内容。
+        alice_id = save_document("alice", "plan.md", "学习 RAG 的步骤")
+        bob_id = save_document("bob", "secret.txt", "只属于 bob 的秘密")
+        self.index(alice_id)
+        self.index(bob_id, user_id="bob")
+
+        response = self.search("RAG 怎么学？")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.collection.last_query["where"], {"user_id": "alice"})
+        self.assertEqual(self.collection.last_query["query_texts"], ["RAG 怎么学？"])
+        self.assertEqual(len(response.json()["results"]), 1)
+        hit = response.json()["results"][0]
+        self.assertEqual(hit["content"], "学习 RAG 的步骤")
+        self.assertEqual(hit["document_id"], alice_id)
+        self.assertEqual(hit["filename"], "plan.md")
+        self.assertEqual(hit["chunk_index"], 1)
+        self.assertEqual(hit["distance"], 0.2)
+
+    def test_search_does_not_read_other_users_chunks(self) -> None:
+        bob_id = save_document("bob", "private.txt", "私人文档")
+        self.index(bob_id, user_id="bob")
+        response = self.search("私人文档")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"results": []})
+
+    def test_empty_index_and_blank_query(self) -> None:
+        # 未索引任何文档时没有搜索结果；空白问题则直接拒绝。
+        self.assertEqual(self.search("学习计划").json(), {"results": []})
+        self.assertIsNone(self.collection.last_query)
+        self.assertEqual(self.search("   ").status_code, 400)
+
+    def test_search_failure_returns_clear_error(self) -> None:
+        document_id = save_document("alice", "notes.txt", "测试检索错误")
+        self.index(document_id)
+        with patch.object(self.collection, "query", side_effect=RuntimeError("Chroma failure")):
+            with patch("app.main.logger"):
+                response = self.search("测试")
+        self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":

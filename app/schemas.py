@@ -43,3 +43,23 @@ class DocumentIndexResponse(BaseModel):
     filename: str
     chunk_count: int
     collection: str
+
+
+# 检索请求只需要当前用户和问题；一次最多返回 3 个相关片段。
+class DocumentSearchRequest(BaseModel):
+    user_id: str = Field(min_length=1, description="当前用户编号")
+    query: str = Field(min_length=1, description="要在已索引文档中检索的问题")
+
+
+# 每个结果都带原文与来源，方便用户核对是否真的来自上传的文档。
+class DocumentSearchHit(BaseModel):
+    id: str
+    content: str
+    document_id: int
+    filename: str
+    chunk_index: int
+    distance: float
+
+
+class DocumentSearchResponse(BaseModel):
+    results: list[DocumentSearchHit]

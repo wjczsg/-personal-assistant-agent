@@ -10,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from .agent import PersonalAssistantAgent
 from .database import init_database, save_document
 from .document_indexing import DocumentNotFoundError, index_uploaded_document
-from .schemas import ChatRequest, ChatResponse, DocumentIndexRequest, DocumentIndexResponse, DocumentUploadResponse, ToolCall
+from .schemas import ChatRequest, ChatResponse, DocumentIndexRequest, DocumentIndexResponse, DocumentSearchRequest, DocumentSearchResponse, DocumentUploadResponse, ToolCall
+from .vector_store import search_document_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,22 @@ async def index_document(document_id: int, request: DocumentIndexRequest) -> Doc
         logger.exception("文档索引失败：document_id=%s", document_id)
         raise HTTPException(status_code=503, detail="文档索引失败，请检查 Chroma 和嵌入模型") from exc
     return DocumentIndexResponse(**result)
+
+
+@app.post("/api/documents/search", response_model=DocumentSearchResponse, summary="检索已索引的文档片段")
+async def search_documents(request: DocumentSearchRequest) -> DocumentSearchResponse:
+    """只检索当前用户的文档片段；不调用大模型生成答案。"""
+    user_id = request.user_id.strip()
+    query = request.query.strip()
+    if not user_id or not query:
+        raise HTTPException(status_code=400, detail="用户 ID 和检索问题不能为空")
+    try:
+        # Chroma 的查询是同步操作，放在线程里避免阻塞其他异步请求。
+        hits = await asyncio.to_thread(search_document_chunks, user_id, query, 3)
+    except Exception as exc:
+        logger.exception("文档检索失败：user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="文档检索失败，请检查 Chroma 和嵌入模型") from exc
+    return DocumentSearchResponse(results=hits)
 
 
 # 对话接口；前端或其他程序通过 POST 请求发送消息。
