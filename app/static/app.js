@@ -3,7 +3,41 @@ const chatForm = document.querySelector("#chatForm");
 const messageInput = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
 const clearButton = document.querySelector("#clearButton");
+const uploadForm = document.querySelector("#uploadForm");
+const documentFile = document.querySelector("#documentFile");
+const uploadButton = document.querySelector("#uploadButton");
+const uploadStatus = document.querySelector("#uploadStatus");
 const userId = localStorage.getItem("assistant-user-id") || "web-user";
+
+uploadForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = documentFile.files[0];
+  if (!file) {
+    uploadStatus.textContent = "请先选择 .txt 或 .md 文件。";
+    return;
+  }
+  // 浏览器先给即时反馈；后端会再做一次校验，不能只信浏览器。
+  if (!/\.(txt|md)$/i.test(file.name) || file.size > 1024 * 1024) {
+    uploadStatus.textContent = "请选择不超过 1 MB 的 .txt 或 .md 文件。";
+    return;
+  }
+  const formData = new FormData();
+  formData.append("user_id", userId);
+  formData.append("file", file);
+  uploadButton.disabled = true;
+  uploadStatus.textContent = "正在保存文档……";
+  try {
+    const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || "上传失败");
+    uploadStatus.textContent = `已保存「${result.filename}」（${result.char_count} 字）；目前还不能对文档提问。`;
+    documentFile.value = "";
+  } catch (error) {
+    uploadStatus.textContent = `保存失败：${error.message}`;
+  } finally {
+    uploadButton.disabled = false;
+  }
+});
 
 function addMessage(role, text, toolCalls = [], memoryCount = null) {
   const wrapper = document.createElement("article");

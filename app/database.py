@@ -16,7 +16,7 @@ def get_connection() -> sqlite3.Connection:
     # 把连接对象交给调用者。
     return connection
 
-# 创建项目需要的三张表。
+# 创建项目需要的数据表。
 def init_database() -> None:
     # 打开数据库连接。
     connection = get_connection()
@@ -52,8 +52,34 @@ def init_database() -> None:
                 created_at TEXT NOT NULL
             )
         """)
+        # 文档原文先保存在 SQLite；这一阶段还不生成向量索引。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
     # 关闭数据库连接。
     connection.close()
+
+
+def save_document(user_id: str, filename: str, content: str) -> int:
+    """保存通过校验的文档原文，并返回数据库分配的文档编号。"""
+    connection = get_connection()
+    try:
+        # 参数占位符防止文件名或正文被当成 SQL 执行。
+        with connection:
+            cursor = connection.execute(
+                "INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, filename, content, datetime.now().isoformat(timespec="seconds")),
+            )
+        return int(cursor.lastrowid)
+    finally:
+        # 保存成功或失败都关闭连接，避免占用数据库文件。
+        connection.close()
 
 # 保存一条对话消息。
 def save_message(user_id: str, role: str, content: str) -> None:

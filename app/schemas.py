@@ -23,3 +23,10 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCall] = []
     # Agent 看到的历史消息数量。
     memory_count: int
+
+
+# 上传接口的返回值只确认保存成功，不代表文档已经可以被 Agent 检索。
+class DocumentUploadResponse(BaseModel):
+    document_id: int
+    filename: str
+    char_count: int

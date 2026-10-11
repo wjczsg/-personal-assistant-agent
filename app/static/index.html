@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>小熊助手</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <!-- 更新静态资源地址，避免浏览器继续使用修改前缓存的 CSS。 -->
+  <link rel="stylesheet" href="/static/style.css?v=document-upload-1" />
 </head>
 <body>
   <main class="app-shell">
@@ -29,6 +30,13 @@
         <button type="button" data-message="我的待办有哪些">☷ 看待办</button>
       </div>
 
+      <form id="uploadForm" class="upload-form">
+        <label for="documentFile">📄 上传文档</label>
+        <input id="documentFile" type="file" accept=".txt,.md" />
+        <button id="uploadButton" type="submit">保存文档</button>
+      </form>
+      <p id="uploadStatus" class="upload-status" role="status">支持 UTF-8 编码的 .txt / .md，最大 1 MB；目前仅保存，还不能对文档提问。</p>
+
       <form id="chatForm" class="composer">
         <label class="sr-only" for="messageInput">输入消息</label>
         <textarea id="messageInput" rows="1" placeholder="输入你想说的话……" autocomplete="off"></textarea>
@@ -39,6 +47,7 @@
 
     <footer>小熊助手 · 你的日常小帮手</footer>
   </main>
-  <script src="/static/app.js"></script>
+  <!-- JS 地址同样换版本；旧脚本没有上传处理，会让表单默认跳回页面顶部。 -->
+  <script src="/static/app.js?v=document-upload-1"></script>
 </body>
 </html>
