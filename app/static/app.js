@@ -30,7 +30,8 @@ uploadForm.addEventListener("submit", async (event) => {
     const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "上传失败");
-    uploadStatus.textContent = `已保存「${result.filename}」（${result.char_count} 字）；目前还不能对文档提问。`;
+    // 显示文档编号，方便下一步在 /docs 中对这篇文档手动建立索引。
+    uploadStatus.textContent = `已保存「${result.filename}」（${result.char_count} 字，编号 #${result.document_id}）；文档索引需在 /docs 中建立。`;
     documentFile.value = "";
   } catch (error) {
     uploadStatus.textContent = `保存失败：${error.message}`;

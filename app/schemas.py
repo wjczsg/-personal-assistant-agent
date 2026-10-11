@@ -32,15 +32,14 @@ class DocumentUploadResponse(BaseModel):
     char_count: int
 
 
-# 一个分块的编号和正文；编号从 1 开始，方便人工在 /docs 中查看。
-class DocumentChunk(BaseModel):
-    index: int
-    content: str
+# 建立索引时由调用方提供用户编号；它会与文档的所属用户核对。
+class DocumentIndexRequest(BaseModel):
+    user_id: str = Field(min_length=1, description="文档所属的用户编号")
 
 
-# 分块预览接口返回文档身份，以及按原文顺序排列的片段。
-class DocumentChunksResponse(BaseModel):
+# 只报告索引结果，不返回文档正文或向量本身。
+class DocumentIndexResponse(BaseModel):
     document_id: int
     filename: str
     chunk_count: int
-    chunks: list[DocumentChunk]
+    collection: str

@@ -52,7 +52,7 @@ def init_database() -> None:
                 created_at TEXT NOT NULL
             )
         """)
-        # 文档原文先保存在 SQLite；这一阶段还不生成向量索引。
+        # 上传时先保存原文；文档向量索引由单独的接口触发。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

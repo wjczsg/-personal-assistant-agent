@@ -30,6 +30,56 @@ _memory_collection = _client.get_or_create_collection(
     name="long_term_memories"
 )
 
+# 上传文档使用单独的集合，不和个人长期记忆混在一起。
+# 两个集合可以共用 chroma_data 目录，但写入和查询互不相混。
+_document_collection = _client.get_or_create_collection(name="document_chunks")
+
+
+def index_document_chunks(
+    document_id: int,
+    user_id: str,
+    filename: str,
+    chunks: list[str],
+) -> int:
+    """把一篇文档的分块写入独立集合，返回实际索引的块数。"""
+    if not chunks:
+        raise ValueError("文档没有可索引的文本片段")
+
+    # 同一文档、同一块始终使用相同 ID；重复索引时 upsert 会更新而不是新增。
+    ids = [f"document:{document_id}:chunk:{index}" for index in range(1, len(chunks) + 1)]
+    # 先记下旧 ID。如果日后分块规则改变、块数减少，成功写入后清除多余旧块。
+    existing_ids = set(
+        _document_collection.get(where={"document_id": document_id}, include=[])["ids"]
+    )
+
+    # 分批写入，避免一篇较长文档一次给 Chroma 太多片段。
+    batch_size = 64
+    for start in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[start : start + batch_size]
+        batch_ids = ids[start : start + batch_size]
+        # 除正文外保存用户、来源文件和块序号，供后续检索过滤与引用。
+        batch_metadata = [
+            {
+                "document_id": document_id,
+                "user_id": user_id,
+                "filename": filename,
+                "chunk_index": start + offset + 1,
+            }
+            for offset in range(len(batch_chunks))
+        ]
+        # 未传 embeddings 时，Chroma 会像长期记忆集合一样自动生成向量。
+        _document_collection.upsert(
+            ids=batch_ids,
+            documents=batch_chunks,
+            metadatas=batch_metadata,
+        )
+
+    # 只有全部新块写入成功后才清理旧块；失败时保留旧索引，方便重试。
+    stale_ids = existing_ids - set(ids)
+    if stale_ids:
+        _document_collection.delete(ids=sorted(stale_ids))
+    return len(chunks)
+
 
 # 定义一个把长期记忆写入 Chroma 的函数。
 def index_memory(

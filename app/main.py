@@ -1,14 +1,18 @@
 ﻿# 从 FastAPI 导入创建 Web 应用所需的类。
+import asyncio
+import logging
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
 from .agent import PersonalAssistantAgent
-from .database import get_document, init_database, save_document
-from .document_chunking import split_document_text
-from .schemas import ChatRequest, ChatResponse, DocumentChunk, DocumentChunksResponse, DocumentUploadResponse, ToolCall
+from .database import init_database, save_document
+from .document_indexing import DocumentNotFoundError, index_uploaded_document
+from .schemas import ChatRequest, ChatResponse, DocumentIndexRequest, DocumentIndexResponse, DocumentUploadResponse, ToolCall
+
+logger = logging.getLogger(__name__)
 
 # 创建 FastAPI 应用对象；它会自动生成 /docs 接口文档。
 app = FastAPI(
@@ -79,24 +83,23 @@ async def upload_document(
     )
 
 
-@app.get("/api/documents/{document_id}/chunks", response_model=DocumentChunksResponse, summary="预览文档分块")
-def preview_document_chunks(document_id: int, user_id: str = Query(...)) -> DocumentChunksResponse:
-    """按需分块并返回结果；这一阶段不写入向量数据库。"""
-    if not user_id.strip():
+@app.post("/api/documents/{document_id}/index", response_model=DocumentIndexResponse, summary="为上传文档建立向量索引")
+async def index_document(document_id: int, request: DocumentIndexRequest) -> DocumentIndexResponse:
+    """手动触发索引；上传成功不依赖 Embedding 模型是否可用。"""
+    user_id = request.user_id.strip()
+    if not user_id:
         raise HTTPException(status_code=400, detail="用户 ID 不能为空")
-    document = get_document(user_id.strip(), document_id)
-    if document is None:
-        # 不区分“文档不存在”和“属于别的用户”，避免泄露其他用户的文档编号。
-        raise HTTPException(status_code=404, detail="未找到该文档")
+    try:
+        # Chroma 的嵌入计算是同步操作，交给线程避免阻塞聊天接口。
+        result = await asyncio.to_thread(index_uploaded_document, user_id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="未找到该文档") from exc
+    except Exception as exc:
+        # 文档原文仍在 SQLite；索引失败可在修复环境后再次调用本接口。
+        logger.exception("文档索引失败：document_id=%s", document_id)
+        raise HTTPException(status_code=503, detail="文档索引失败，请检查 Chroma 和嵌入模型") from exc
+    return DocumentIndexResponse(**result)
 
-    # 每次从原文计算分块，方便此阶段调整切分规则，不重复存储片段。
-    pieces = split_document_text(document["content"])
-    return DocumentChunksResponse(
-        document_id=document_id,
-        filename=document["filename"],
-        chunk_count=len(pieces),
-        chunks=[DocumentChunk(index=index, content=piece) for index, piece in enumerate(pieces, start=1)],
-    )
 
 # 对话接口；前端或其他程序通过 POST 请求发送消息。
 @app.post("/api/chat", response_model=ChatResponse, summary="和个人助理对话")

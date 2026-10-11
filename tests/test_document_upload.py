@@ -35,13 +35,18 @@ class DocumentUploadTests(unittest.TestCase):
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
-    def test_home_references_updated_upload_assets(self) -> None:
-        # 上传表单必须加载带版本号的新 JS/CSS，避免浏览器使用旧缓存。
+    def test_home_keeps_upload_without_chunk_preview(self) -> None:
+        # 页面仍有上传表单，但不再出现“查看分块”的按钮和区域。
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="uploadForm"', response.text)
-        self.assertIn('/static/app.js?v=document-upload-1', response.text)
-        self.assertIn('/static/style.css?v=document-upload-1', response.text)
+        self.assertNotIn('id="previewChunksButton"', response.text)
+        self.assertNotIn('id="chunkPreview"', response.text)
+        self.assertIn('/static/app.js?v=document-index-1', response.text)
+        self.assertIn('/static/style.css?v=document-upload-2', response.text)
+        # OpenAPI 接口列表里也不再提供专门的分块预览接口。
+        paths = self.client.get("/openapi.json").json()["paths"]
+        self.assertNotIn("/api/documents/{document_id}/chunks", paths)
 
     def upload(self, filename: str, content: bytes, user_id: str = "alice"):
         # 所有用例都通过这个辅助方法发请求，避免重复写 POST 参数。

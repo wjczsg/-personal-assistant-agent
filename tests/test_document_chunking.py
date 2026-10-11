@@ -1,15 +1,7 @@
-"""验证文档分块的边界规则，以及分块预览接口的用户隔离。"""
+"""验证文档分块的边界规则；不依赖网页或向量数据库。"""
 
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
-
-from fastapi.testclient import TestClient
-
-from app.database import init_database, save_document
 from app.document_chunking import split_document_text
-from app.main import app
 
 
 class SplitDocumentTextTests(unittest.TestCase):
@@ -50,44 +42,6 @@ class SplitDocumentTextTests(unittest.TestCase):
             with self.subTest(max_chars=max_chars, overlap=overlap):
                 with self.assertRaises(ValueError):
                     split_document_text("测试", max_chars=max_chars, overlap=overlap)
-
-
-class DocumentChunksApiTests(unittest.TestCase):
-    def setUp(self) -> None:
-        # 接口测试也使用临时数据库，不修改用户真实上传的文档。
-        temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary_directory.cleanup)
-        database_patcher = patch(
-            "app.database.DATABASE_PATH",
-            Path(temporary_directory.name) / "assistant.db",
-        )
-        database_patcher.start()
-        self.addCleanup(database_patcher.stop)
-        init_database()
-        self.client = TestClient(app)
-        self.addCleanup(self.client.close)
-
-    def test_preview_returns_chunks_in_original_order(self) -> None:
-        # 先保存一篇长文，再从 HTTP 接口按文档编号请求它的分块。
-        document_id = save_document("alice", "notes.md", "甲" * 1100)
-        response = self.client.get(f"/api/documents/{document_id}/chunks", params={"user_id": "alice"})
-        self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertEqual(result["document_id"], document_id)
-        self.assertEqual(result["filename"], "notes.md")
-        self.assertEqual(result["chunk_count"], len(result["chunks"]))
-        self.assertEqual([chunk["index"] for chunk in result["chunks"]], list(range(1, result["chunk_count"] + 1)))
-        self.assertTrue(all(len(chunk["content"]) <= 500 for chunk in result["chunks"]))
-
-    def test_other_user_cannot_preview_document(self) -> None:
-        # 即使知道文档编号，bob 也不能读取 alice 的文档正文。
-        document_id = save_document("alice", "private.txt", "只属于 alice")
-        response = self.client.get(f"/api/documents/{document_id}/chunks", params={"user_id": "bob"})
-        self.assertEqual(response.status_code, 404)
-
-    def test_nonexistent_document_returns_404(self) -> None:
-        response = self.client.get("/api/documents/999/chunks", params={"user_id": "alice"})
-        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":
