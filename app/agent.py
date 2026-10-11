@@ -21,6 +21,7 @@ MODEL_TOOL_NAMES = [
     "get_todos",
     "remember_todo",
     "complete_todo",
+    "delete_todo",
     "get_weather",
     "save_memory",
 ]
@@ -135,11 +136,24 @@ class PersonalAssistantAgent:
             # 说明现有工具各自的使用场景和多工具任务的执行规则。
             "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才添加带伞待办。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
         }
+        # 工具定义告诉模型有哪些合法参数；这里再补充自然语言问题与参数的对应关系。
+        # 例如“我完成了什么”对应 completed，“所有待办”对应 all；普通查询保持旧的默认值。
+        system_message["content"] += (
+            "查询未完成待办时调用 get_todos，省略 status 或传 pending；"
+            "查询已完成待办时传 completed；查询所有待办时传 all。"
+        )
         # 完成待办是修改已有记录：必须先确定编号，不能把“完成了”当成新增待办。
         system_message["content"] += (
             "用户要求标记完成待办时，如果给出了明确编号，调用 complete_todo，并把编号放入 todo_id；"
             "如果只给出待办内容，先调用 get_todos 查看未完成列表，只有唯一匹配时才用对应编号调用 complete_todo；"
             "找不到或无法唯一确定时，先询问用户，不要猜测编号，也不要创建新待办。"
+        )
+        # 删除与标记完成不同，会永久移除记录；只在用户明确要求删除时才调用。
+        # 只有待办内容而没有编号时，先查全部（包括已完成）再确定唯一编号。
+        system_message["content"] += (
+            "用户明确要求删除待办时才调用 delete_todo；"
+            "若没有明确编号，先调用 get_todos 并传 status=all，只有唯一匹配时才删除；"
+            "找不到或有多个可能时先询问用户，绝不猜编号，也不要把标记完成当成删除。"
         )
         # 创建本次请求的消息列表。
         messages = [system_message]

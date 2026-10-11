@@ -1,4 +1,4 @@
-﻿# 导入 sqlite3，这是 Python 自带的轻量级数据库。
+# 导入 sqlite3，这是 Python 自带的轻量级数据库。
 import sqlite3
 # 导入 datetime，用来记录每条消息的时间。
 from datetime import datetime
@@ -103,18 +103,33 @@ def add_todo(user_id: str, content: str) -> dict[str, Any]:
     # 返回一个普通字典，方便 Agent 继续处理。
     return {"id": todo_id, "content": content, "done": False}
 
-# 查询某个用户的未完成待办事项。
-def list_todos(user_id: str) -> list[dict[str, Any]]:
-    # 打开数据库连接。
+# 数据库层只负责查出待办记录；把记录转换成用户可读的文字由工具层完成。
+# user_id 用来限定当前用户；status 不传时默认 pending，旧调用 list_todos(user_id) 仍可用。
+def list_todos(user_id: str, status: str = "pending") -> list[dict[str, Any]]:
+    # 只允许三种查询范围：pending=未完成，completed=已完成，all=全部。
+    # 未知值直接报错，避免以后新增调用方误传参数时悄悄查错范围。
+    if status not in ("pending", "completed", "all"):
+        raise ValueError("待办查询状态必须是 pending、completed 或 all。")
+
+    # 查全部时不限制 done，但 WHERE user_id = ? 仍保证不会查到其他用户的待办。
+    if status == "all":
+        query = "SELECT id, content, done FROM todos WHERE user_id = ? ORDER BY id"
+        # SQL 只有一个占位符，因此这里只传一个参数。
+        parameters = (user_id,)
+    else:
+        # 只查一种状态时，第二个 ? 对应 done 字段；SQL 不拼接用户或模型输入。
+        query = "SELECT id, content, done FROM todos WHERE user_id = ? AND done = ? ORDER BY id"
+        # 数据库用 0 表示未完成，用 1 表示已完成。
+        parameters = (user_id, 0 if status == "pending" else 1)
+
+    # 打开连接、执行参数化查询，再把所有匹配的记录取出来。
     connection = get_connection()
-    # 查询未完成的待办。
-    rows = connection.execute(
-        "SELECT id, content, done FROM todos WHERE user_id = ? AND done = 0 ORDER BY id",
-        (user_id,),
-    ).fetchall()
-    # 关闭连接。
-    connection.close()
-    # 把 SQLite 行转换成普通字典。
+    try:
+        rows = connection.execute(query, parameters).fetchall()
+    finally:
+        # 即使查询出错，也要关闭连接，避免 SQLite 文件被长期占用。
+        connection.close()
+    # sqlite3.Row 转为普通字典，工具层便可读取 id、content 和 done。
     return [dict(row) for row in rows]
 
 
@@ -146,6 +161,36 @@ def mark_todo_done(user_id: str, todo_id: int) -> dict[str, Any] | None:
             return {"id": row["id"], "content": row["content"], "already_done": False}
     finally:
         # 无论找到待办与否，都关闭数据库连接。
+        connection.close()
+
+
+# 根据编号永久删除当前用户的一条待办；既可删除未完成项，也可删除已完成项。
+def delete_todo_record(user_id: str, todo_id: int) -> dict[str, Any] | None:
+    # 打开数据库连接；返回 None 表示当前用户没有这个编号的待办。
+    connection = get_connection()
+    try:
+        # 在一次事务中查找并删除，出现异常时 SQLite 会回滚删除操作。
+        with connection:
+            # 同时按编号和用户编号查找，不能只凭编号读取其他用户的内容。
+            row = connection.execute(
+                "SELECT id, content FROM todos WHERE id = ? AND user_id = ?",
+                (todo_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            # 删除条件再次带上 user_id，保证这条语句只能影响当前用户的记录。
+            cursor = connection.execute(
+                "DELETE FROM todos WHERE id = ? AND user_id = ?",
+                (todo_id, user_id),
+            )
+            # 如果记录在查找后已被其他请求删掉，不误报为删除成功。
+            if cursor.rowcount != 1:
+                return None
+            # 删除成功后返回原编号和内容，供工具层生成用户能看懂的反馈。
+            return {"id": row["id"], "content": row["content"]}
+    finally:
+        # 无论成功、未找到或抛出异常，都要释放 SQLite 连接。
         connection.close()
 
 

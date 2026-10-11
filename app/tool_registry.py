@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from .tools import (
     calculator,
     complete_todo,
+    delete_todo,
     get_current_time,
     get_todos,
     get_weather,
@@ -80,14 +81,28 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        # 注册待办查询工具的模型描述。
+        # 这里是“给大模型看的说明书”，不是实际执行数据库查询的代码。
         "type": "function",
         "function": {
-            # 待办查询工具的名字。
+            # 模型选择 get_todos 时，后面会用同名键找到 _run_get_todos 执行函数。
             "name": "get_todos",
-            # 说明这个工具的用途。
-            "description": "查询当前用户还没有完成的待办事项。",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            # 描述帮助模型判断何时使用该工具，以及它支持哪几种查询范围。
+            "description": "按状态查询当前用户的待办事项：默认未完成，也可查询已完成或全部。",
+            "parameters": {
+                # Function Calling 要求参数是 JSON 对象，例如 {} 或 {"status": "completed"}。
+                "type": "object",
+                "properties": {
+                    # status 是唯一的可选参数；它决定模型希望查看哪一类待办。
+                    "status": {
+                        "type": "string",
+                        # enum 告诉模型只能从这三个英文值中选一个；实际执行时还会再次校验。
+                        "enum": ["pending", "completed", "all"],
+                        "description": "pending 查询未完成（默认）；completed 查询已完成；all 查询全部。",
+                    },
+                },
+                # 空列表表示没有必填参数，所以旧的 {} 调用依然合法。
+                "required": [],
+            },
         },
     },
     {
@@ -122,6 +137,24 @@ TOOL_DEFINITIONS = [
                     # todo_id 是待办列表中显示的 # 后面的正整数。
                     "todo_id": {"type": "integer", "minimum": 1, "description": "要完成的待办编号"},
                 },
+                "required": ["todo_id"],
+            },
+        },
+    },
+    {
+        # 删除是永久操作：模型必须先确定用户明确要删哪一条。
+        "type": "function",
+        "function": {
+            # 该名称要与下面 TOOL_HANDLERS 的键一致。
+            "name": "delete_todo",
+            "description": "仅在用户明确要求删除待办时，按编号永久删除当前用户的一条待办（未完成和已完成均可）。只有文字描述时，先调用 get_todos(status='all') 查找；只有唯一匹配才使用其编号，无法确定时先询问用户。不要把完成待办误当作删除。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    # 编号来自待办列表中显示的 # 后面的数字，不能由模型猜测。
+                    "todo_id": {"type": "integer", "minimum": 1, "description": "要永久删除的待办编号"},
+                },
+                # 删除必须有明确编号，不允许空参数调用。
                 "required": ["todo_id"],
             },
         },
@@ -200,10 +233,12 @@ async def _run_current_time(arguments: dict[str, Any], user_id: str) -> str:
     return get_current_time()
 
 
-# 待办查询工具的执行函数。
+# 注册表调用的适配函数：把模型参数转交给实际负责组织回复的 tools.get_todos。
 async def _run_get_todos(arguments: dict[str, Any], user_id: str) -> str:
-    # 使用传入的用户编号查询该用户的待办事项。
-    return get_todos(user_id)
+    # arguments 来自模型，例如 {} 或 {"status": "all"}；省略 status 就用 pending。
+    status = arguments.get("status", "pending")
+    # user_id 来自 Agent 当前会话，不允许模型在参数里自行指定用户。
+    return get_todos(user_id, status)
 
 
 # 待办添加工具的执行函数。
@@ -220,6 +255,14 @@ async def _run_complete_todo(arguments: dict[str, Any], user_id: str) -> str:
     todo_id = arguments.get("todo_id")
     # 具体的参数校验和数据库更新交给工具层处理。
     return complete_todo(user_id, todo_id)
+
+
+# 把模型的删除请求转交给工具层；不允许模型选择删除哪个用户的数据。
+async def _run_delete_todo(arguments: dict[str, Any], user_id: str) -> str:
+    # get 在缺少 todo_id 时返回 None，工具层会给出清楚的参数错误。
+    todo_id = arguments.get("todo_id")
+    # user_id 由 Agent 当前会话提供，而不是从模型生成的 arguments 中读取。
+    return delete_todo(user_id, todo_id)
 
 
 # 天气工具的执行函数。
@@ -255,6 +298,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "remember_todo": _run_remember_todo,
     # 注册待办完成执行函数。
     "complete_todo": _run_complete_todo,
+    # 注册待办删除执行函数；名称须与给模型看的工具定义一致。
+    "delete_todo": _run_delete_todo,
     # 注册天气执行函数。
     "get_weather": _run_weather,
     # 注册长期记忆执行函数。

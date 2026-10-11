@@ -3,7 +3,7 @@ from datetime import date as calendar_date, datetime
 import httpx
 
 from .config import settings
-from .database import add_todo, list_todos, mark_todo_done, save_memory_record
+from .database import add_todo, delete_todo_record, list_todos, mark_todo_done, save_memory_record
 from .vector_store import index_memory
 
 
@@ -163,11 +163,35 @@ def remember_todo(user_id: str, content: str) -> str:
     return f"已记录待办 #{todo['id']}：{todo['content']}"
 
 
-def get_todos(user_id: str) -> str:
-    todos = list_todos(user_id)
+def get_todos(user_id: str, status: str = "pending") -> str:
+    """读取当前用户的待办，并转换为可以直接展示给用户的中文文本。"""
+    # 这一层接收模型传来的 status；先检查取值，防止错误参数进入数据库层。
+    # 与数据库层抛异常不同，这里返回错误文本，方便 Agent 告诉模型发生了什么。
+    if status not in ("pending", "completed", "all"):
+        return "查询待办失败：status 必须是 pending、completed 或 all。"
+
+    # 把当前用户编号和查询范围交给数据库层；不传 status 时默认是 pending。
+    todos = list_todos(user_id, status)
     if not todos:
-        return "目前没有未完成的待办事项。"
-    return "\n".join(f"#{todo['id']}：{todo['content']}" for todo in todos)
+        # 空列表可能代表“没有未完成”“没有已完成”或“完全没有待办”，三者提示不同。
+        empty_messages = {
+            "pending": "目前没有未完成的待办事项。",
+            "completed": "目前没有已完成的待办事项。",
+            "all": "目前没有待办事项。",
+        }
+        # 用 status 作为字典键，选出与本次查询范围对应的提示。
+        return empty_messages[status]
+
+    # 旧版 get_todos 只显示未完成，格式是“#编号：内容”；保留格式以免影响已有调用。
+    if status == "pending":
+        # join 用换行符连接各条待办；列表中每条都会单独占一行。
+        return "\n".join(f"#{todo['id']}：{todo['content']}" for todo in todos)
+    # 查询已完成或全部时，根据数据库的 done 字段标明每条记录的状态。
+    # done=1 显示“已完成”，done=0 显示“未完成”；全部查询时两种状态会同时出现。
+    return "\n".join(
+        f"#{todo['id']} [{'已完成' if todo['done'] else '未完成'}]：{todo['content']}"
+        for todo in todos
+    )
 
 
 def complete_todo(user_id: str, todo_id: int) -> str:
@@ -184,6 +208,22 @@ def complete_todo(user_id: str, todo_id: int) -> str:
     if todo["already_done"]:
         return f"待办 #{todo_id} 已经完成了：{todo['content']}"
     return f"已完成待办 #{todo_id}：{todo['content']}"
+
+
+def delete_todo(user_id: str, todo_id: int) -> str:
+    """按编号永久删除当前用户的一条待办，并返回可读的结果。"""
+    # bool 也是 Python 的 int 子类，所以不能只用 isinstance(todo_id, int) 检查。
+    # 编号必须是大于零的真正整数；模型传入字符串、布尔值或空值都不执行删除。
+    if type(todo_id) is not int or todo_id <= 0:
+        return "删除待办失败：待办编号必须是正整数。"
+
+    # 数据库层负责按 user_id 和编号执行删除；工具层不直接拼接 SQL。
+    deleted = delete_todo_record(user_id, todo_id)
+    if deleted is None:
+        # 不透露该编号是否属于其他用户，统一反馈“没有找到你的待办”。
+        return f"没有找到你的待办 #{todo_id}，请先查询全部待办确认编号。"
+    # 删除是永久移除记录，不等于把 done 改为 1。
+    return f"已删除待办 #{deleted['id']}：{deleted['content']}"
 
 
 def save_memory(user_id: str, content: str, memory_type: str) -> str:

@@ -146,6 +146,55 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed_tools[1][1], {"todo_id": 5})
         self.assertIn("已经完成", answer)
 
+    async def test_lookup_all_todos_before_deleting_by_content(self):
+        # 只给文字描述时，让模型先查全部列表（包含已完成项）。
+        lookup_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "lookup-todo-for-delete",
+                "type": "function",
+                "function": {
+                    "name": "get_todos",
+                    "arguments": json.dumps({"status": "all"}),
+                },
+            }],
+        }
+        delete_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "delete-todo-after-lookup",
+                "type": "function",
+                "function": {"name": "delete_todo", "arguments": json.dumps({"todo_id": 5})},
+            }],
+        }
+        final_answer = {"role": "assistant", "content": "整理简历这项待办已经删除。"}
+        client = FakeAsyncClient([
+            FakeResponse(lookup_call),
+            FakeResponse(delete_call),
+            FakeResponse(final_answer),
+        ])
+        executed_tools = []
+
+        async def fake_execute_tool(name, arguments, user_id):
+            # 只记录调用和模拟返回值；这个测试不会修改真实数据库。
+            executed_tools.append((name, arguments, user_id))
+            if name == "get_todos":
+                return "#5 [已完成]：整理简历"
+            return "已删除待办 #5：整理简历"
+
+        agent = PersonalAssistantAgent("test-user")
+        with patch("app.agent.settings.llm_api_key", "test-key"), \
+                patch("app.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+            answer = await agent._ask_llm("把整理简历这条待办删除", [])
+
+        self.assertEqual([item[0] for item in executed_tools], ["get_todos", "delete_todo"])
+        self.assertEqual(executed_tools[0][1], {"status": "all"})
+        self.assertEqual(executed_tools[1][1], {"todo_id": 5})
+        self.assertIn("已经删除", answer)
+
 
 if __name__ == "__main__":
     unittest.main()
