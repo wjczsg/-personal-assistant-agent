@@ -31,6 +31,11 @@ class DocumentUploadTests(unittest.TestCase):
         self.addCleanup(database_patcher.stop)
         # 在测试数据库中建表，否则上传接口插入 documents 时会找不到表。
         init_database()
+        # 本文件只测上传校验与响应；把索引函数替换成假的，避免测试写入真实 Chroma。
+        # 真正的“上传后自动分块并写入集合”在 test_document_indexing.py 用假集合验证。
+        index_patcher = patch("app.main.index_uploaded_document", return_value={"chunk_count": 1})
+        self.mock_index = index_patcher.start()
+        self.addCleanup(index_patcher.stop)
         # 创建模拟 HTTP 客户端；测试结束后关闭它。
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
@@ -44,7 +49,7 @@ class DocumentUploadTests(unittest.TestCase):
         self.assertNotIn('id="chunkPreview"', response.text)
         self.assertNotIn('id="documentSearchForm"', response.text)
         self.assertNotIn('id="documentSearchResults"', response.text)
-        self.assertIn('/static/app.js?v=document-search-removed-1', response.text)
+        self.assertIn('/static/app.js?v=document-auto-index-1', response.text)
         self.assertIn('/static/style.css?v=document-search-removed-1', response.text)
         # OpenAPI 接口列表里也不再提供专门的分块预览接口。
         paths = self.client.get("/openapi.json").json()["paths"]
@@ -85,6 +90,10 @@ class DocumentUploadTests(unittest.TestCase):
         self.assertEqual(row["content"], "你好，小熊")
         # char_count 是字符数，不是 UTF-8 编码后的字节数。
         self.assertEqual(response.json()["char_count"], len("你好，小熊"))
+        # 上传后自动为刚保存的文档建索引，并把结果明确返回给前端。
+        self.assertTrue(response.json()["indexed"])
+        self.assertEqual(response.json()["chunk_count"], 1)
+        self.mock_index.assert_called_once_with("alice", row["id"])
 
     def test_md_with_bom_is_saved_without_bom(self) -> None:
         # 有些编辑器会在 UTF-8 文件开头加 BOM（三个字节）；大写扩展名也应接受。
@@ -99,6 +108,7 @@ class DocumentUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         # 失败的请求不能在数据库留下记录。
         self.assertEqual(len(self.document_rows()), 0)
+        self.mock_index.assert_not_called()
 
     def test_large_file_is_rejected(self) -> None:
         # 生成比 1 MB 上限恰好多 1 字节的内容，测试边界条件。
@@ -129,6 +139,16 @@ class DocumentUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         # 数据库只保存最后的文件名，不拿 ../../ 当作保存路径。
         self.assertEqual(self.document_rows()[0]["filename"], "notes.md")
+
+    def test_index_failure_keeps_uploaded_original(self) -> None:
+        # 模拟 Embedding/Chroma 出错：原文仍保存，响应不能谎称索引成功。
+        self.mock_index.side_effect = RuntimeError("Chroma failure")
+        with patch("app.main.logger"):
+            response = self.upload("notes.txt", "原文要保留".encode("utf-8"))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["indexed"])
+        self.assertIsNone(response.json()["chunk_count"])
+        self.assertEqual(self.document_rows()[0]["content"], "原文要保留")
 
 
 if __name__ == "__main__":

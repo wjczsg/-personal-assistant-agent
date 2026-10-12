@@ -25,11 +25,14 @@ class ChatResponse(BaseModel):
     memory_count: int
 
 
-# 上传接口的返回值只确认保存成功，不代表文档已经可以被 Agent 检索。
+# 上传响应分别报告“原文已保存”和“索引是否成功”，避免混淆两种状态。
 class DocumentUploadResponse(BaseModel):
     document_id: int
     filename: str
     char_count: int
+    indexed: bool
+    # 索引失败时没有可靠的块数；成功时返回实际写入的块数。
+    chunk_count: int | None = None
 
 
 # 建立索引时由调用方提供用户编号；它会与文档的所属用户核对。

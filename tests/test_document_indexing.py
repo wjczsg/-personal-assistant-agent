@@ -146,15 +146,37 @@ class DocumentIndexingTests(unittest.TestCase):
         response = self.index(999)
         self.assertEqual(response.status_code, 404)
 
-    def test_upload_does_not_start_embedding_automatically(self) -> None:
-        # 上传和索引分开，避免嵌入模型暂时不可用时上传也失败。
+    def test_upload_indexes_new_document_automatically(self) -> None:
+        # 上传后直接分块并写进文档集合，不需要再手动调用索引接口。
         response = self.client.post(
             "/api/documents/upload",
             data={"user_id": "alice"},
             files={"file": ("notes.txt", b"hello", "text/plain")},
         )
         self.assertEqual(response.status_code, 200)
+        document_id = response.json()["document_id"]
+        self.assertTrue(response.json()["indexed"])
+        self.assertEqual(response.json()["chunk_count"], 1)
+        row = self.collection.rows[f"document:{document_id}:chunk:1"]
+        self.assertEqual(row["content"], "hello")
+        self.assertEqual(row["metadata"]["user_id"], "alice")
+
+    def test_failed_automatic_index_can_be_retried_by_document_id(self) -> None:
+        # Chroma 一时失败时，上传仍返回文档编号；修复后原有手动接口可重试。
+        with patch.object(self.collection, "upsert", side_effect=RuntimeError("Chroma failure")):
+            with patch("app.main.logger"):
+                upload_response = self.client.post(
+                    "/api/documents/upload",
+                    data={"user_id": "alice"},
+                    files={"file": ("retry.txt", b"retry me", "text/plain")},
+                )
+        self.assertEqual(upload_response.status_code, 200)
+        self.assertFalse(upload_response.json()["indexed"])
+        document_id = upload_response.json()["document_id"]
         self.assertEqual(self.collection.rows, {})
+        retry_response = self.index(document_id)
+        self.assertEqual(retry_response.status_code, 200)
+        self.assertEqual(retry_response.json()["chunk_count"], 1)
 
     def test_index_failure_does_not_delete_sqlite_original(self) -> None:
         document_id = save_document("alice", "notes.txt", "原文仍然存在")

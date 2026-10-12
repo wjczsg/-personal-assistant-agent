@@ -25,13 +25,15 @@ uploadForm.addEventListener("submit", async (event) => {
   formData.append("user_id", userId);
   formData.append("file", file);
   uploadButton.disabled = true;
-  uploadStatus.textContent = "正在保存文档……";
+  uploadStatus.textContent = "正在保存文档并建立索引，请稍候……";
   try {
     const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "上传失败");
-    // 显示文档编号，方便下一步在 /docs 中对这篇文档手动建立索引。
-    uploadStatus.textContent = `已保存「${result.filename}」（${result.char_count} 字，编号 #${result.document_id}）；文档索引需在 /docs 中建立。`;
+    // 原文保存和向量索引分别报告；失败时保留编号，方便到 /docs 重试。
+    uploadStatus.textContent = result.indexed
+      ? `已保存并建立索引：「${result.filename}」（${result.char_count} 字，编号 #${result.document_id}，${result.chunk_count} 块）；现在可以提问。`
+      : `已保存「${result.filename}」（编号 #${result.document_id}），但自动索引失败；可在 /docs 按编号重试。`;
     documentFile.value = "";
   } catch (error) {
     uploadStatus.textContent = `保存失败：${error.message}`;

@@ -54,7 +54,7 @@ async def upload_document(
     file: UploadFile = File(...),
     user_id: str = Form(...),
 ) -> DocumentUploadResponse:
-    """只接收 UTF-8 编码的 .txt/.md，将原文保存到 SQLite。"""
+    """保存 UTF-8 纯文本，再自动为这篇文档建立向量索引。"""
     # 文件名仅保留最后一段；不将用户提供的文件名用于磁盘路径。
     filename = (file.filename or "").replace("\\", "/").split("/")[-1]
     if not filename or Path(filename).suffix.lower() not in ALLOWED_DOCUMENT_SUFFIXES:
@@ -76,17 +76,36 @@ async def upload_document(
     if not content.strip() or "\x00" in content:
         raise HTTPException(status_code=400, detail="文档不能为空，且必须是纯文本")
 
-    document_id = save_document(user_id.strip(), filename, content)
+    # 先保存原文：即使后续 Chroma 出错，文档也能按编号重新建立索引。
+    clean_user_id = user_id.strip()
+    document_id = save_document(clean_user_id, filename, content)
+    try:
+        # 复用手动索引接口所调用的同一条流程：读原文、分块、写入 Chroma。
+        # Chroma 是同步库；放到线程里，不堵住 FastAPI 的异步事件循环。
+        index_result = await asyncio.to_thread(index_uploaded_document, clean_user_id, document_id)
+    except Exception:
+        # 保存和索引是两件事：索引失败不能把已保存的文档说成“上传失败”。
+        logger.exception("上传后自动索引失败：document_id=%s", document_id)
+        return DocumentUploadResponse(
+            document_id=document_id,
+            filename=filename,
+            char_count=len(content),
+            indexed=False,
+        )
+
+    # 等索引完成才返回成功，前端可以据此判断能否直接对文档提问。
     return DocumentUploadResponse(
         document_id=document_id,
         filename=filename,
         char_count=len(content),
+        indexed=True,
+        chunk_count=index_result["chunk_count"],
     )
 
 
 @app.post("/api/documents/{document_id}/index", response_model=DocumentIndexResponse, summary="为上传文档建立向量索引")
 async def index_document(document_id: int, request: DocumentIndexRequest) -> DocumentIndexResponse:
-    """手动触发索引；上传成功不依赖 Embedding 模型是否可用。"""
+    """按文档编号重新建索引；可用于自动索引失败后的重试。"""
     user_id = request.user_id.strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="用户 ID 不能为空")

@@ -35,7 +35,7 @@
         <input id="documentFile" type="file" accept=".txt,.md" />
         <button id="uploadButton" type="submit">保存文档</button>
       </form>
-      <p id="uploadStatus" class="upload-status" role="status">支持 UTF-8 编码的 .txt / .md，最大 1 MB；目前仅保存，还不能对文档提问。</p>
+      <p id="uploadStatus" class="upload-status" role="status">支持 UTF-8 编码的 .txt / .md，最大 1 MB；保存后会自动建立索引。</p>
 
       <form id="chatForm" class="composer">
         <label class="sr-only" for="messageInput">输入消息</label>
@@ -48,6 +48,6 @@
     <footer>小熊助手 · 你的日常小帮手</footer>
   </main>
   <!-- JS 地址同样换版本，确保浏览器加载更新后的上传代码。 -->
-  <script src="/static/app.js?v=document-search-removed-1"></script>
+  <script src="/static/app.js?v=document-auto-index-1"></script>
 </body>
 </html>
