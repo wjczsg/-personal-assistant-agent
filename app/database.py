@@ -42,6 +42,23 @@ def init_database() -> None:
                 created_at TEXT NOT NULL
             )
         """)
+        # 提案只记录“建议做什么”，不能把 pending 提案当成真正的待办。
+        # 用户确认后，才会在同一事务中插入 todos 并把提案标为 applied。
+        # id 是提案编号；todo_id 是确认后才产生的待办编号，两者属于不同表。
+        # resolved_at 在等待确认时为空，确认或取消后才记录处理时间。
+        # CHECK 限定 status 的三个合法值，避免拼写错误的状态写进数据库。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS todo_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'applied', 'cancelled')),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                todo_id INTEGER
+            )
+        """)
         # 创建长期记忆表；每条记忆都绑定到具体用户和记忆类型。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -158,6 +175,146 @@ def add_todo(user_id: str, content: str) -> dict[str, Any]:
     connection.close()
     # 返回一个普通字典，方便 Agent 继续处理。
     return {"id": todo_id, "content": content, "done": False}
+
+
+def create_todo_proposal(user_id: str, content: str) -> dict[str, Any]:
+    """只保存一条待确认的添加建议；此时不会创建真正的待办。"""
+    # 这里的 user_id 是提案所属用户，content 是建议写入待办的文字。
+    # 空用户或空内容都不能生成提案，避免后续确认时写入无意义的待办。
+    if not user_id.strip() or not content.strip():
+        raise ValueError("用户编号和待办建议内容不能为空。")
+
+    # 去掉内容两端的空格；时间转成字符串，便于存入 SQLite 的 TEXT 列。
+    clean_content = content.strip()
+    created_at = datetime.now().isoformat(timespec="seconds")
+    # 下面只操作 todo_proposals，不调用 add_todo，也不写入 todos。
+    connection = get_connection()
+    try:
+        # with connection 表示一次数据库事务：成功提交，出错回滚。
+        with connection:
+            cursor = connection.execute(
+                "INSERT INTO todo_proposals (user_id, content, created_at) VALUES (?, ?, ?)",
+                (user_id, clean_content, created_at),
+            )
+        # cursor.lastrowid 是 SQLite 刚分配的“提案编号”，不是待办编号。
+        # status 的默认值是 pending；todo_id 为空表示还没有生成待办。
+        # 返回普通字典，后续 Agent 或接口可以把提案内容展示给用户。
+        return {
+            "id": cursor.lastrowid,
+            "user_id": user_id,
+            "content": clean_content,
+            "status": "pending",
+            "created_at": created_at,
+            "resolved_at": None,
+            "todo_id": None,
+        }
+    finally:
+        # 不管插入成功还是抛出异常，都释放数据库连接。
+        connection.close()
+
+
+def get_todo_proposal(user_id: str, proposal_id: int) -> dict[str, Any] | None:
+    """按用户和提案编号查询；别人的提案对当前用户表现为不存在。"""
+    connection = get_connection()
+    try:
+        # WHERE 同时限制编号和所属用户；两个 ? 的值按下面元组的顺序传入。
+        row = connection.execute(
+            "SELECT id, user_id, content, status, created_at, resolved_at, todo_id "
+            "FROM todo_proposals WHERE id = ? AND user_id = ?",
+            (proposal_id, user_id),
+        ).fetchone()
+        # fetchone 只取一条。查不到就返回 None，查到则转成普通字典。
+        return dict(row) if row is not None else None
+    finally:
+        connection.close()
+
+
+def apply_todo_proposal(user_id: str, proposal_id: int) -> dict[str, Any] | None:
+    """确认一条提案：只在首次确认时创建待办，重复确认不会重复添加。"""
+    connection = get_connection()
+    try:
+        # 整个确认流程共用一个连接；任何一步失败，这个事务都会回滚。
+        with connection:
+            # 先取得写锁，确保两个同时到达的确认请求不会都看到 pending。
+            connection.execute("BEGIN IMMEDIATE")
+            # 先检查提案是否属于当前用户，以及它现在处于什么状态。
+            row = connection.execute(
+                "SELECT id, user_id, content, status, created_at, resolved_at, todo_id "
+                "FROM todo_proposals WHERE id = ? AND user_id = ?",
+                (proposal_id, user_id),
+            ).fetchone()
+            if row is None:
+                # 编号不存在，或者它属于其他用户，都不做任何修改。
+                return None
+            if row["status"] == "applied":
+                # 页面重复点击或网络重试时，返回原结果，而不是再插入一条待办。
+                # changed=False 让调用方知道“这次没有新增任何数据”。
+                return {**dict(row), "changed": False}
+            if row["status"] == "cancelled":
+                # 取消过的建议不能再被确认，需要重新创建一条新提案。
+                raise ValueError("已取消的提案不能再确认。")
+
+            # 走到这里说明提案仍是 pending，用户的确认才开始真正写待办。
+            resolved_at = datetime.now().isoformat(timespec="seconds")
+            # 这里不能直接调用 add_todo：它会另开连接，无法与状态更新共用事务。
+            cursor = connection.execute(
+                "INSERT INTO todos (user_id, content, created_at) VALUES (?, ?, ?)",
+                (user_id, row["content"], resolved_at),
+            )
+            # 把提案标记为 applied，并记下刚创建的待办编号。
+            # WHERE 仍校验用户及 pending 状态，防止误改其他提案。
+            connection.execute(
+                "UPDATE todo_proposals SET status = 'applied', resolved_at = ?, todo_id = ? "
+                "WHERE id = ? AND user_id = ? AND status = 'pending'",
+                (resolved_at, cursor.lastrowid, proposal_id, user_id),
+            )
+            # 事务提交后，提案和新待办同时可见；中途报错则两者一起回滚。
+            # changed=True 表示本次确认真的新增了一条待办。
+            return {
+                **dict(row),
+                "status": "applied",
+                "resolved_at": resolved_at,
+                "todo_id": cursor.lastrowid,
+                "changed": True,
+            }
+    finally:
+        connection.close()
+
+
+def cancel_todo_proposal(user_id: str, proposal_id: int) -> dict[str, Any] | None:
+    """取消待确认的提案；取消后不能再通过这条提案创建待办。"""
+    connection = get_connection()
+    try:
+        with connection:
+            # 与确认操作一样先取得写锁，避免确认和取消同时改动同一提案。
+            connection.execute("BEGIN IMMEDIATE")
+            # 只允许查找当前用户自己的提案。
+            row = connection.execute(
+                "SELECT id, user_id, content, status, created_at, resolved_at, todo_id "
+                "FROM todo_proposals WHERE id = ? AND user_id = ?",
+                (proposal_id, user_id),
+            ).fetchone()
+            if row is None:
+                # 不存在或不是当前用户的提案，不修改数据库。
+                return None
+            if row["status"] == "cancelled":
+                # 重复点取消不需要再次更新；changed=False 表示没有新变化。
+                return {**dict(row), "changed": False}
+            if row["status"] == "applied":
+                # 待办已经创建，取消提案不能代替“删除待办”。
+                raise ValueError("已执行的提案不能取消；需要另外处理已创建的待办。")
+
+            # 只有 pending 提案能变成 cancelled；这里只改提案，不写 todos。
+            resolved_at = datetime.now().isoformat(timespec="seconds")
+            connection.execute(
+                "UPDATE todo_proposals SET status = 'cancelled', resolved_at = ? "
+                "WHERE id = ? AND user_id = ? AND status = 'pending'",
+                (resolved_at, proposal_id, user_id),
+            )
+            # 返回取消后的状态，供以后页面显示“已取消”。
+            return {**dict(row), "status": "cancelled", "resolved_at": resolved_at, "changed": True}
+    finally:
+        connection.close()
 
 # 数据库层只负责查出待办记录；把记录转换成用户可读的文字由工具层完成。
 # user_id 用来限定当前用户；status 不传时默认 pending，旧调用 list_todos(user_id) 仍可用。
