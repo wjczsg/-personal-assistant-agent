@@ -49,9 +49,25 @@ def init_database() -> None:
                 user_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 memory_type TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
+                superseded_by INTEGER
             )
         """)
+        # 旧项目的 memories 表已经存在时，CREATE TABLE IF NOT EXISTS 不会添加新列。
+        # 这里读取现有列名，只补缺失的列；因此启动多次也不会重复迁移。
+        memory_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(memories)")
+        }
+        if "status" not in memory_columns:
+            # 默认 active 保证旧记忆不会因为升级数据库而被擅自判为失效。
+            connection.execute(
+                "ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active' "
+                "CHECK (status IN ('active', 'superseded'))"
+            )
+        if "superseded_by" not in memory_columns:
+            # NULL 表示这条记忆还没有被另一条记忆取代。
+            connection.execute("ALTER TABLE memories ADD COLUMN superseded_by INTEGER")
         # 上传时先保存原文；文档向量索引由单独的接口触发。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS documents (
@@ -291,4 +307,76 @@ def save_memory_record(user_id: str, content: str, memory_type: str) -> dict[str
         "content": content,
         "memory_type": memory_type,
         "created_at": created_at,
+        # 数据库默认把新记忆标为有效，且尚未被其他记忆取代。
+        "status": "active",
+        "superseded_by": None,
     }
+
+
+def list_memory_records(user_id: str, status: str = "all") -> list[dict[str, Any]]:
+    """列出当前用户的长期记忆；可只看有效或已被取代的记录。"""
+    # 状态只能从固定选项中选，避免调用方传错后悄悄查出意外结果。
+    if status not in ("all", "active", "superseded"):
+        raise ValueError("记忆查询状态必须是 all、active 或 superseded。")
+
+    connection = get_connection()
+    try:
+        # 用户编号永远参与查询，不能通过记忆编号读到其他用户的内容。
+        if status == "all":
+            rows = connection.execute(
+                "SELECT id, user_id, content, memory_type, created_at, status, superseded_by "
+                "FROM memories WHERE user_id = ? ORDER BY id",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT id, user_id, content, memory_type, created_at, status, superseded_by "
+                "FROM memories WHERE user_id = ? AND status = ? ORDER BY id",
+                (user_id, status),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+def supersede_memory_record(
+    user_id: str, memory_id: int, replacement_id: int
+) -> dict[str, Any] | None:
+    """将当前用户的一条旧记忆标为由另一条有效记忆取代。"""
+    # 一条记忆不能取代自己，否则会形成没有意义的自引用。
+    if memory_id == replacement_id:
+        raise ValueError("旧记忆和新记忆不能是同一条。")
+
+    connection = get_connection()
+    try:
+        # 在读取前开启写事务，避免两个并发请求把同一条旧记忆指向不同目标。
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            old = connection.execute(
+                "SELECT id, user_id, content, memory_type, created_at, status, superseded_by "
+                "FROM memories WHERE id = ? AND user_id = ?",
+                (memory_id, user_id),
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT id, status FROM memories WHERE id = ? AND user_id = ?",
+                (replacement_id, user_id),
+            ).fetchone()
+            # 两条记忆必须都属于当前用户；缺任一条时不改动数据库。
+            if old is None or replacement is None:
+                return None
+            if old["status"] == "superseded":
+                # 重试相同操作是安全的；但不允许悄悄改写已失效记忆的去向。
+                if old["superseded_by"] != replacement_id:
+                    raise ValueError("旧记忆已被另一条记忆取代。")
+                return {**dict(old), "changed": False}
+            if replacement["status"] != "active":
+                raise ValueError("取代旧记忆的新记忆必须仍然有效。")
+
+            connection.execute(
+                "UPDATE memories SET status = 'superseded', superseded_by = ? "
+                "WHERE id = ? AND user_id = ? AND status = 'active'",
+                (replacement_id, memory_id, user_id),
+            )
+            return {**dict(old), "status": "superseded", "superseded_by": replacement_id, "changed": True}
+    finally:
+        connection.close()
