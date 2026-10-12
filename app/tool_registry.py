@@ -2,6 +2,11 @@
 
 # 导入 inspect，用来判断一个工具执行函数是否是异步函数。
 import inspect
+# Chroma 的查询是同步函数；放到线程里执行，避免阻塞异步对话。
+import asyncio
+# 把检索结果整理成结构化文字交回模型。
+import json
+import logging
 # 导入 Any，表示工具参数和返回数据可以有多种类型。
 from typing import Any, Awaitable, Callable
 
@@ -20,6 +25,9 @@ from .tools import (
     save_memory,
     update_todo,
 )
+from .vector_store import search_document_chunks
+
+logger = logging.getLogger(__name__)
 
 
 # 定义工具执行函数的统一类型。
@@ -233,6 +241,28 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        # 告诉模型什么时候应当主动检索用户上传的文档。
+        "type": "function",
+        "function": {
+            "name": "search_uploaded_documents",
+            "description": (
+                "当用户询问已上传文档的内容、要求根据文档回答，或需要核实文档中的事实时使用。"
+                "与文档无关的闲聊、天气、时间、计算和待办问题不要调用。"
+                "检索只返回当前用户已索引的文档片段，不会生成最终答案。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用于查找相关文档片段的具体问题或关键词",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -315,6 +345,39 @@ async def _run_save_memory(arguments: dict[str, Any], user_id: str) -> str:
     return save_memory(user_id, content, memory_type)
 
 
+# 文档检索工具只接收模型给出的问题；用户编号必须来自 Agent 当前会话。
+async def _run_search_uploaded_documents(arguments: dict[str, Any], user_id: str) -> str:
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return "文档检索需要非空的 query 参数。"
+    try:
+        # 每次最多取三个片段；Chroma 会在内部按 user_id 过滤其他用户的数据。
+        hits = await asyncio.to_thread(search_document_chunks, user_id, query.strip(), 3)
+    except Exception:
+        # 检索故障与“文档没有答案”不同，不能让模型把两者混为一谈。
+        logger.exception("文档检索工具执行失败：user_id=%s", user_id)
+        return "文档检索暂时失败，不能据此判断文档中有没有答案。"
+    if not hits:
+        return "当前用户没有可检索的已索引文档片段，不能根据上传文档回答。"
+
+    # 原文和出处一起返回；让模型引用时能指明文件名、文档编号与片段编号。
+    # JSON 只是数据载体，文档里的文字仍是不可信资料，不是给 Agent 的指令。
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "content": hit["content"],
+                    "filename": hit["filename"],
+                    "document_id": hit["document_id"],
+                    "chunk_index": hit["chunk_index"],
+                }
+                for hit in hits
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
 # 工具名称到执行函数的映射表。
 # Agent 只需要拿工具名称查表，不需要为每个工具继续添加一串 if。
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -336,6 +399,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "get_weather": _run_weather,
     # 注册长期记忆执行函数。
     "save_memory": _run_save_memory,
+    # 文档检索由模型按需选择，不再在每次聊天前自动执行。
+    "search_uploaded_documents": _run_search_uploaded_documents,
 }
 
 
