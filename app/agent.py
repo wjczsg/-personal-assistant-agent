@@ -10,7 +10,14 @@ import httpx
 from typing import Any
 # 导入配置、记忆和工具函数。
 from .config import settings
-from .database import get_recent_messages, save_message
+from .database import (
+    apply_todo_proposal,
+    cancel_todo_proposal,
+    get_recent_messages,
+    get_todo_proposal,
+    list_pending_todo_proposals,
+    save_message,
+)
 from .tool_registry import execute_tool, get_tool_definitions
 from .vector_store import search_memories
 
@@ -19,7 +26,7 @@ MODEL_TOOL_NAMES = [
     "calculator",
     "get_current_time",
     "get_todos",
-    "remember_todo",
+    "propose_todo",
     "complete_todo",
     "delete_todo",
     "update_todo",
@@ -36,6 +43,8 @@ class PersonalAssistantAgent:
         self.user_id = user_id
         # 用列表记录这一次请求实际调用了哪些工具。
         self.tool_calls: list[dict[str, str]] = []
+        # 只记录本轮由模型新建的提案；稍后用数据库里的真实内容生成确认提示。
+        self.proposed_todos: list[dict[str, Any]] = []
 
     # 统一记录工具调用，便于返回给前端学习观察。
     def _record_tool(self, name: str, result: str) -> str:
@@ -118,8 +127,78 @@ class PersonalAssistantAgent:
             return "get_current_time 不需要参数，请传入空对象 {}。"
         # 从注册表找到真实函数，并等待执行结果。
         result = await execute_tool(name, arguments, self.user_id)
+        if name == "propose_todo":
+            # 工具可能返回参数错误文字；只有合法的 pending JSON 才算新建成功。
+            try:
+                proposal = json.loads(result)
+            except json.JSONDecodeError:
+                proposal = None
+            if isinstance(proposal, dict) and proposal.get("status") == "pending":
+                self.proposed_todos.append(proposal)
         # 记录工具名称和结果，使前端能显示本次实际使用的工具。
         return self._record_tool(name, result)
+
+    def _proposal_reply(self) -> str:
+        """用真实提案内容生成答复，避免模型误说“已经添加待办”。"""
+        lines = [
+            f"提案 #{item['proposal_id']}：{item['content']}"
+            for item in self.proposed_todos
+        ]
+        if len(lines) == 1:
+            instruction = "目前还没有加入待办。请在下一条消息回复‘确认’或‘取消’。"
+        else:
+            instruction = "目前都还没有加入待办。请回复‘确认提案 #编号’或‘取消提案 #编号’，逐条处理。"
+        return "我先提出待办建议：\n" + "\n".join(lines) + "\n" + instruction
+
+    async def _handle_todo_reply(self, message: str) -> str | None:
+        """只接受明确的确认/取消回复；普通聊天仍交给原来的模型流程。"""
+        # 例如“确认”“取消”“确认提案 #3”；不把含糊的“好吧”当作授权。
+        match = re.fullmatch(
+            r"(确认|取消)(?:添加)?(?:\s*提案\s*[#＃]?\s*(\d+))?[。！!]*",
+            message.strip(),
+        )
+        if match is None:
+            return None
+        action, explicit_id = match.groups()
+        if explicit_id is not None:
+            # 明确给出编号时，只查当前用户的这一条提案。
+            proposal = await asyncio.to_thread(get_todo_proposal, self.user_id, int(explicit_id))
+            if proposal is None:
+                return "找不到属于你的这条待办提案。"
+        else:
+            # 没给编号时只允许恰好存在一条待确认提案，避免误选。
+            pending = await asyncio.to_thread(list_pending_todo_proposals, self.user_id)
+            if not pending:
+                return "目前没有待确认的待办提案。"
+            if len(pending) > 1:
+                options = "\n".join(f"提案 #{item['id']}：{item['content']}" for item in pending)
+                return (
+                    "你有多条待确认提案，请指定编号，例如‘确认提案 #1’：\n"
+                    + options
+                )
+            proposal = pending[0]
+
+        try:
+            if action == "确认":
+                result = await asyncio.to_thread(apply_todo_proposal, self.user_id, proposal["id"])
+            else:
+                result = await asyncio.to_thread(cancel_todo_proposal, self.user_id, proposal["id"])
+        except ValueError as exc:
+            # 已取消的不能确认，已执行的不能取消；返回明确的状态冲突。
+            return str(exc)
+        if result is None:
+            return "找不到属于你的这条待办提案。"
+        if action == "确认":
+            if result["changed"]:
+                answer = f"已确认提案 #{proposal['id']}，新增待办 #{result['todo_id']}：{result['content']}"
+            else:
+                answer = f"提案 #{proposal['id']} 之前已经确认，待办 #{result['todo_id']} 没有重复添加。"
+        elif result["changed"]:
+            answer = f"已取消提案 #{proposal['id']}，没有添加待办：{result['content']}"
+        else:
+            answer = f"提案 #{proposal['id']} 之前已经取消，没有添加待办。"
+        tool_name = "confirm_todo_proposal" if action == "确认" else "cancel_todo_proposal"
+        return self._record_tool(tool_name, answer)
 
     # 调用大模型，让它理解问题，并在需要时选择已注册的工具。
     async def _ask_llm(self, message: str, memory: list[dict[str, Any]]) -> str:
@@ -136,7 +215,7 @@ class PersonalAssistantAgent:
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
             # 说明现有工具各自的使用场景和多工具任务的执行规则。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 remember_todo，并把要记录的内容放入 content 参数；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才添加带伞待办。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 propose_todo，并把建议内容放入 content 参数；propose_todo 只生成待确认提案，不能说已经添加待办，用户必须在下一条消息明确确认；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才提出带伞待办建议。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
         }
         # 工具定义告诉模型有哪些合法参数；这里再补充自然语言问题与参数的对应关系。
         # 例如“我完成了什么”对应 completed，“所有待办”对应 all；普通查询保持旧的默认值。
@@ -271,6 +350,11 @@ class PersonalAssistantAgent:
         memory = get_recent_messages(self.user_id)
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
+        # 确认/取消是新一条用户消息触发的后端操作，不让模型在提案当轮替用户批准。
+        decision_answer = await self._handle_todo_reply(message)
+        if decision_answer is not None:
+            save_message(self.user_id, "assistant", decision_answer)
+            return decision_answer, self.tool_calls, len(memory)
         # 目前所有工具都交给模型通过 Function Calling 选择。
         tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
@@ -282,7 +366,17 @@ class PersonalAssistantAgent:
             # 返回回答、工具调用记录和记忆数量。
             return answer, self.tool_calls, len(memory)
         # 普通问题交给大模型处理。
-        answer = await self._ask_llm(message, memory)
+        try:
+            answer = await self._ask_llm(message, memory)
+        except Exception:
+            # 提案已保存时，即使模型后续生成回答失败，也要把提案编号明确交给用户。
+            if not self.proposed_todos:
+                raise
+            answer = self._proposal_reply()
+        else:
+            if self.proposed_todos:
+                # 使用数据库工具返回的真实提案覆盖模型措辞，防止误报“已添加”。
+                answer = self._proposal_reply()
         # 保存模型回答。
         save_message(self.user_id, "assistant", answer)
         # 返回回答、工具调用记录和记忆数量。

@@ -40,7 +40,7 @@ class FakeAsyncClient:
 
 
 class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
-    async def test_weather_result_can_trigger_remember_todo(self):
+    async def test_weather_result_can_trigger_todo_proposal(self):
         # 第一次模型响应：先查询明天天气。
         weather_call = {
             "role": "assistant",
@@ -54,15 +54,15 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
                 },
             }],
         }
-        # 第二次模型响应：读到下雨结果后，继续添加带伞待办。
-        remember_call = {
+        # 第二次模型响应：读到下雨结果后，只提出带伞待办建议。
+        propose_call = {
             "role": "assistant",
             "content": None,
             "tool_calls": [{
                 "id": "todo-call-1",
                 "type": "function",
                 "function": {
-                    "name": "remember_todo",
+                    "name": "propose_todo",
                     "arguments": json.dumps({"content": "出门带伞"}),
                 },
             }],
@@ -70,11 +70,11 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
         # 第三次模型响应：两个工具都完成后生成最终回答。
         final_answer = {
             "role": "assistant",
-            "content": "明天北京有雨，我已经帮你添加了出门带伞的待办。",
+            "content": "明天北京有雨，建议添加出门带伞待办，等你确认后执行。",
         }
         client = FakeAsyncClient([
             FakeResponse(weather_call),
-            FakeResponse(remember_call),
+            FakeResponse(propose_call),
             FakeResponse(final_answer),
         ])
         executed_tools = []
@@ -83,7 +83,7 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             executed_tools.append((name, arguments, user_id))
             if name == "get_weather":
                 return "北京明天中雨，最高降水概率 80%。"
-            return "已记录待办：出门带伞"
+            return json.dumps({"proposal_id": 7, "content": "出门带伞", "status": "pending"})
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.agent.settings.llm_api_key", "test-key"), \
@@ -92,10 +92,10 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             answer = await agent._ask_llm("如果明天下雨，就帮我添加带伞待办", [])
 
         # 验证两个工具按照依赖顺序执行，并且最终回答来自第三轮模型响应。
-        self.assertEqual([item[0] for item in executed_tools], ["get_weather", "remember_todo"])
+        self.assertEqual([item[0] for item in executed_tools], ["get_weather", "propose_todo"])
         self.assertEqual(executed_tools[0][1], {"city": "北京", "date": "tomorrow"})
         self.assertEqual(executed_tools[1][1], {"content": "出门带伞"})
-        self.assertIn("已经帮你添加", answer)
+        self.assertIn("等你确认", answer)
 
     async def test_lookup_todo_before_marking_it_complete(self):
         # 用户只说待办内容时，模型先查询列表，不能自行猜测编号。

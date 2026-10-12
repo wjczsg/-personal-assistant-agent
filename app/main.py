@@ -8,9 +8,27 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
 from .agent import PersonalAssistantAgent
-from .database import init_database, save_document
+from .database import (
+    apply_todo_proposal,
+    cancel_todo_proposal,
+    create_todo_proposal,
+    init_database,
+    save_document,
+)
 from .document_indexing import DocumentNotFoundError, index_uploaded_document
-from .schemas import ChatRequest, ChatResponse, DocumentIndexRequest, DocumentIndexResponse, DocumentSearchRequest, DocumentSearchResponse, DocumentUploadResponse, ToolCall
+from .schemas import (
+    ChatRequest,
+    ChatResponse,
+    DocumentIndexRequest,
+    DocumentIndexResponse,
+    DocumentSearchRequest,
+    DocumentSearchResponse,
+    DocumentUploadResponse,
+    TodoProposalActionRequest,
+    TodoProposalCreateRequest,
+    TodoProposalResponse,
+    ToolCall,
+)
 from .vector_store import search_document_chunks
 
 logger = logging.getLogger(__name__)
@@ -47,6 +65,68 @@ def on_startup() -> None:
 def health() -> dict[str, str]:
     # 返回一个简单的成功信息。
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/todo-proposals",
+    response_model=TodoProposalResponse,
+    status_code=201,
+    summary="创建待确认的添加待办提案",
+)
+def create_todo_proposal_api(request: TodoProposalCreateRequest) -> TodoProposalResponse:
+    """只保存提案，不直接添加待办；可先在 /docs 手动验证。"""
+    # 去掉输入两端的空格，防止用户提交全是空白的编号或内容。
+    user_id = request.user_id.strip()
+    content = request.content.strip()
+    if not user_id or not content:
+        raise HTTPException(status_code=400, detail="用户 ID 和待办建议内容不能为空")
+    proposal = create_todo_proposal(user_id, content)
+    return TodoProposalResponse(**proposal)
+
+
+@app.post(
+    "/api/todo-proposals/{proposal_id}/confirm",
+    response_model=TodoProposalResponse,
+    summary="确认提案并添加待办",
+)
+def confirm_todo_proposal_api(
+    proposal_id: int, request: TodoProposalActionRequest
+) -> TodoProposalResponse:
+    """仅在首次确认时写入真正的待办；重复确认不会重复添加。"""
+    user_id = request.user_id.strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="用户 ID 不能为空")
+    try:
+        proposal = apply_todo_proposal(user_id, proposal_id)
+    except ValueError as exc:
+        # 例如已取消的提案不能再确认；409 表示与当前状态冲突。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if proposal is None:
+        # 提案不存在或 user_id 不匹配时统一返回 404；当前项目仍未接入登录认证。
+        raise HTTPException(status_code=404, detail="未找到该待办提案")
+    return TodoProposalResponse(**proposal)
+
+
+@app.post(
+    "/api/todo-proposals/{proposal_id}/cancel",
+    response_model=TodoProposalResponse,
+    summary="取消待办提案",
+)
+def cancel_todo_proposal_api(
+    proposal_id: int, request: TodoProposalActionRequest
+) -> TodoProposalResponse:
+    """取消尚未确认的提案；不会删除已经创建的待办。"""
+    user_id = request.user_id.strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="用户 ID 不能为空")
+    try:
+        proposal = cancel_todo_proposal(user_id, proposal_id)
+    except ValueError as exc:
+        # 已执行的提案不能取消；需要另走删除待办的流程。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="未找到该待办提案")
+    return TodoProposalResponse(**proposal)
 
 
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse, summary="上传纯文本文档")

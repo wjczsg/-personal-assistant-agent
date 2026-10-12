@@ -25,6 +25,30 @@ class ChatResponse(BaseModel):
     memory_count: int
 
 
+# 创建“添加待办的建议”时，用户和建议内容都必须由请求提供。
+# 这一步只产生提案，不会立刻新增真正的待办。
+class TodoProposalCreateRequest(BaseModel):
+    user_id: str = Field(min_length=1, description="提案所属的用户编号")
+    content: str = Field(min_length=1, description="建议添加到待办的文字")
+
+
+# 确认和取消只需要用户编号；提案编号放在接口路径中。
+class TodoProposalActionRequest(BaseModel):
+    user_id: str = Field(min_length=1, description="执行确认或取消的用户编号")
+
+
+# 三个提案接口共用同一种返回格式，方便以后前端显示提案状态。
+class TodoProposalResponse(BaseModel):
+    id: int  # 提案编号，不是待办编号。
+    user_id: str
+    content: str
+    status: str  # pending=待确认，applied=已执行，cancelled=已取消。
+    created_at: str
+    resolved_at: str | None  # 待确认时为空。
+    todo_id: int | None  # 确认后才有真正的待办编号。
+    changed: bool | None = None  # 确认/取消接口用它表示这次是否真的改变了状态。
+
+
 # 上传响应分别报告“原文已保存”和“索引是否成功”，避免混淆两种状态。
 class DocumentUploadResponse(BaseModel):
     document_id: int

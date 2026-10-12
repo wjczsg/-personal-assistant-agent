@@ -13,6 +13,8 @@ from typing import Any, Awaitable, Callable
 # LangChain 的 @tool 会把普通 Python 函数包装成带参数校验的工具。
 from langchain_core.tools import tool
 
+# 添加待办时只创建提案，不直接写入 todos；确认发生在用户的下一条消息。
+from .database import create_todo_proposal
 # 导入真正执行工作的工具函数。
 from .tools import (
     calculator,
@@ -21,7 +23,6 @@ from .tools import (
     get_current_time,
     get_todos,
     get_weather,
-    remember_todo,
     save_memory,
     update_todo,
 )
@@ -115,19 +116,17 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        # 注册待办添加工具的模型描述。
+        # 模型只能提出待办建议，不能通过工具直接添加真正的待办。
         "type": "function",
         "function": {
-            # 待办添加工具的名字。
-            "name": "remember_todo",
-            # 说明这个工具的用途。
-            "description": "把用户想记住的事情添加为待办事项。",
+            "name": "propose_todo",
+            "description": "提出一条添加待办的建议，但不真正添加；必须等用户下一条消息明确确认后才能写入。",
             "parameters": {
                 # 参数整体是一个 JSON 对象。
                 "type": "object",
-                # 只需要一个待办内容参数。
+                # 一条提案只对应一条待办；用户编号由 Agent 提供。
                 "properties": {
-                    "content": {"type": "string", "description": "要记录的待办内容"}
+                    "content": {"type": "string", "description": "建议添加的待办内容"}
                 },
                 # content 是必填参数。
                 "required": ["content"],
@@ -292,12 +291,18 @@ async def _run_get_todos(arguments: dict[str, Any], user_id: str) -> str:
     return get_todos(user_id, status)
 
 
-# 待办添加工具的执行函数。
-async def _run_remember_todo(arguments: dict[str, Any], user_id: str) -> str:
-    # 读取模型或其他调用方传入的待办内容。
-    content = str(arguments["content"])
-    # 使用当前用户编号保存待办。
-    return remember_todo(user_id, content)
+# 创建待确认提案，而不是调用原来的直接添加待办函数。
+async def _run_propose_todo(arguments: dict[str, Any], user_id: str) -> str:
+    content = arguments.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return "待办提案需要非空的 content 参数。"
+    # SQLite 操作是同步的；交给线程，避免阻塞 Agent 的异步请求。
+    proposal = await asyncio.to_thread(create_todo_proposal, user_id, content)
+    # 结构化结果供 Agent 读取编号和状态；不让模型把 pending 误说成已添加。
+    return json.dumps(
+        {"proposal_id": proposal["id"], "content": proposal["content"], "status": "pending"},
+        ensure_ascii=False,
+    )
 
 
 # 待办完成工具的执行函数。
@@ -387,8 +392,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "get_current_time": _run_current_time,
     # 注册待办查询执行函数。
     "get_todos": _run_get_todos,
-    # 注册待办添加执行函数。
-    "remember_todo": _run_remember_todo,
+    # 模型只能创建提案；原来的 remember_todo 函数仍保留在 tools.py，但不暴露给模型。
+    "propose_todo": _run_propose_todo,
     # 注册待办完成执行函数。
     "complete_todo": _run_complete_todo,
     # 注册待办删除执行函数；名称须与给模型看的工具定义一致。

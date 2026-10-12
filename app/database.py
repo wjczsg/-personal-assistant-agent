@@ -229,6 +229,21 @@ def get_todo_proposal(user_id: str, proposal_id: int) -> dict[str, Any] | None:
         connection.close()
 
 
+def list_pending_todo_proposals(user_id: str) -> list[dict[str, Any]]:
+    """列出当前用户尚未决定的提案，供“确认/取消”回复选择目标。"""
+    connection = get_connection()
+    try:
+        # 不查询已确认或已取消的提案；用户编号始终参与筛选。
+        rows = connection.execute(
+            "SELECT id, user_id, content, status, created_at, resolved_at, todo_id "
+            "FROM todo_proposals WHERE user_id = ? AND status = 'pending' ORDER BY id",
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
 def apply_todo_proposal(user_id: str, proposal_id: int) -> dict[str, Any] | None:
     """确认一条提案：只在首次确认时创建待办，重复确认不会重复添加。"""
     connection = get_connection()
