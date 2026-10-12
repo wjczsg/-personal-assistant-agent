@@ -8,6 +8,8 @@ from typing import Any
 # 导入 Chroma 的 Python 客户端库。
 import chromadb
 
+from .database import get_active_memory_ids
+
 
 # 获取当前文件所在的 app 文件夹路径。
 APP_DIR = Path(__file__).resolve().parent
@@ -166,7 +168,13 @@ def search_memories(
     limit: int = 3,
 ) -> list[dict[str, Any]]:
     # 说明这个函数返回一个由字典组成的列表。
-    """按语义搜索某个用户的长期记忆，供后续 Agent 检索使用。"""
+    """按语义检索记忆，只把 SQLite 中仍有效的记录交给 Agent。"""
+
+    # SQLite 是记忆状态的准确信息来源。即使旧向量还留在 Chroma，
+    # 只要数据库将它标记为 superseded，就不能再把它传给模型。
+    active_ids = get_active_memory_ids(user_id)
+    if limit <= 0 or not active_ids:
+        return []
 
     # 统计集合里目前一共有多少条向量记录。
     total = _memory_collection.count()
@@ -174,46 +182,40 @@ def search_memories(
     if total == 0:
         return []
 
-    # 使用 query_texts 传入自然语言查询。
-    # Chroma 会自动把 query 转成向量，再和已有文档向量比较相似度。
-    result = _memory_collection.query(
-        # query_texts 是要进行语义搜索的问题文字。
-        query_texts=[query],
-        # 返回 limit 条结果，但不能超过集合中的记录总数。
-        n_results=min(limit, total),
-        # 只保留 user_id 与当前用户一致的记忆。
-        where={"user_id": user_id},
-    )
-
-    # 准备一个普通 Python 列表，用来保存整理后的检索结果。
-    memories: list[dict[str, Any]] = []
-
-    # Chroma 的结果通常是“查询批次 → 结果列表”的嵌套结构。
-    # [0] 表示取出本次唯一查询对应的结果列表。
-    documents = result.get("documents", [[]])[0]
-    # 读取每条结果对应的 Chroma ID。
-    ids = result.get("ids", [[]])[0]
-    # 读取每条结果对应的元数据。
-    metadatas = result.get("metadatas", [[]])[0]
-    # 读取查询文字和每条记忆之间的距离数值。
-    # 距离通常越小，表示语义越接近，具体含义取决于距离算法。
-    distances = result.get("distances", [[]])[0]
-
-    # 遍历 Chroma 返回的每条原始记忆文本。
-    for index, content in enumerate(documents):
-        # 将 Chroma 的嵌套结果整理成项目更容易使用的字典。
-        memories.append(
-            {
-                # 保存 Chroma 中的记忆 ID。
-                "id": ids[index],
-                # 保存匹配到的原始记忆文本。
-                "content": content,
-                # 保存这条记忆的类型。
-                "memory_type": metadatas[index].get("memory_type"),
-                # 保存语义距离，方便后续判断相关程度。
-                "distance": distances[index] if index < len(distances) else None,
-            }
+    # 先取少量最相近的候选；若它们都已失效，就逐步扩大范围。
+    # 不能只取前三条再过滤，否则第四条有效记忆永远没有机会返回。
+    requested = min(limit, total)
+    while True:
+        result = _memory_collection.query(
+            # Chroma 将问题转成向量，并按语义相似度排列结果。
+            query_texts=[query],
+            n_results=requested,
+            # 向量层仍按用户隔离；下方再用 SQLite 校验有效状态。
+            where={"user_id": user_id},
+            include=["documents", "metadatas", "distances"],
         )
+        # Chroma 可以批量查多个问题，所以这里取本次唯一问题的结果 [0]。
+        ids = result.get("ids", [[]])[0]
+        documents = result.get("documents", [[]])[0]
+        metadatas = result.get("metadatas", [[]])[0]
+        distances = result.get("distances", [[]])[0]
 
-    # 返回整理后的记忆列表，后续 Agent 可以把它们放入模型上下文。
-    return memories
+        memories: list[dict[str, Any]] = []
+        for index, memory_id in enumerate(ids):
+            # Chroma 中的失效记录或 SQLite 已不存在的孤儿向量都跳过。
+            if memory_id not in active_ids:
+                continue
+            memories.append(
+                {
+                    "id": memory_id,
+                    "content": documents[index],
+                    "memory_type": metadatas[index].get("memory_type"),
+                    "distance": distances[index] if index < len(distances) else None,
+                }
+            )
+
+        # 已找到足够的有效结果、当前用户的结果已取完，或整个集合已取完时结束。
+        if len(memories) >= limit or len(ids) < requested or requested == total:
+            return memories[:limit]
+        # 继续向后找有效记录；最多扩到集合总量，不会无限循环。
+        requested = min(requested * 2, total)

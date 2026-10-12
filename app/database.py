@@ -339,6 +339,21 @@ def list_memory_records(user_id: str, status: str = "all") -> list[dict[str, Any
         connection.close()
 
 
+def get_active_memory_ids(user_id: str) -> set[str]:
+    """返回当前用户仍有效的记忆编号，供 Chroma 检索结果做最终核对。"""
+    connection = get_connection()
+    try:
+        # Chroma 使用字符串 ID，SQLite 使用整数 ID；在这里统一转为字符串。
+        # 只取编号，不读取所有记忆正文，避免为状态过滤搬运无关数据。
+        rows = connection.execute(
+            "SELECT id FROM memories WHERE user_id = ? AND status = 'active'",
+            (user_id,),
+        ).fetchall()
+        return {str(row["id"]) for row in rows}
+    finally:
+        connection.close()
+
+
 def supersede_memory_record(
     user_id: str, memory_id: int, replacement_id: int
 ) -> dict[str, Any] | None:
