@@ -21,6 +21,44 @@ from .database import (
 from .tool_registry import execute_tool, get_tool_definitions
 from .vector_store import search_memories
 
+# 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
+# 这不是最终的语义判断，而是一个低成本的“是否值得检索”门控，
+# 用来避免“你好”、天气和待办等问题每次都访问 Chroma。
+MEMORY_QUERY_HINTS = (
+    "长期记忆",
+    "记得我",
+    "之前说过",
+    "上次说过",
+    "我的目标",
+    "职业目标",
+    "求职方向",
+    "工作方向",
+    "发展方向",
+    "想从事",
+    "毕业后",
+    "我的计划",
+    "我的背景",
+    "我的经历",
+    "我的偏好",
+    "我喜欢",
+    "我习惯",
+    "按照我的",
+    "根据我的目标",
+)
+
+
+def should_search_memory(message: str) -> bool:
+    """判断当前问题是否值得查询长期记忆。
+
+    这里使用轻量关键词门控，而不是额外请求一次大模型：额外调用模型会增加成本和延迟，
+    也不适合作为上下文优化的第一步。后续如果规则覆盖不足，可以替换成独立分类器，
+    但不需要改变 _get_relevant_memories 的调用接口。
+    """
+    normalized_message = message.strip()
+    if not normalized_message:
+        return False
+    return any(hint in normalized_message for hint in MEMORY_QUERY_HINTS)
+
 # 这些工具都交给模型自主选择。
 MODEL_TOOL_NAMES = [
     "calculator",
@@ -55,6 +93,9 @@ class PersonalAssistantAgent:
 
     # 从 Chroma 检索与当前问题相关的长期记忆。
     async def _get_relevant_memories(self, message: str) -> list[dict[str, Any]]:
+        # 普通问候、天气、计算和待办问题通常不依赖长期个人背景，直接跳过向量检索。
+        if not should_search_memory(message):
+            return []
         # Chroma 当前使用同步 API；放到线程中执行，避免阻塞 FastAPI 的异步事件循环。
         try:
             return await asyncio.to_thread(
@@ -62,6 +103,7 @@ class PersonalAssistantAgent:
                 self.user_id,
                 message,
                 3,
+                settings.memory_distance_threshold,
             )
         # 向量数据库暂时不可用时，继续进行普通对话，不让记忆功能拖垮 Agent。
         except Exception:
@@ -280,6 +322,8 @@ class PersonalAssistantAgent:
         max_tool_rounds = 3
         # 按轮次请求模型，直到模型返回最终文字。
         for _ in range(max_tool_rounds):
+            # 每一轮都读取当前允许使用的工具描述。
+            tool_definitions = get_tool_definitions(MODEL_TOOL_NAMES)
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
                 # 从注册表读取当前允许使用的工具描述，与消息一起发送给模型。
@@ -290,7 +334,7 @@ class PersonalAssistantAgent:
                         "model": settings.llm_model,
                         "messages": messages,
                         # auto 允许模型选择工具、继续调用下一个工具，或者直接回答。
-                        "tools": get_tool_definitions(MODEL_TOOL_NAMES),
+                        "tools": tool_definitions,
                         "tool_choice": "auto",
                         "temperature": 0.7,
                     },

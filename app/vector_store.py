@@ -166,9 +166,15 @@ def search_memories(
     query: str,
     # 最多返回多少条最相关的记忆，默认返回 3 条。
     limit: int = 3,
+    # Chroma 距离阈值；传 None 时只做原有的有效状态过滤，不做相关性过滤。
+    distance_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     # 说明这个函数返回一个由字典组成的列表。
-    """按语义检索记忆，只把 SQLite 中仍有效的记录交给 Agent。"""
+    """按语义检索记忆，只返回有效且达到相关性阈值的记录。"""
+
+    # 阈值不能是负数；负数会让所有正常距离都被错误过滤掉。
+    if distance_threshold is not None and distance_threshold < 0:
+        raise ValueError("记忆距离阈值不能小于 0。")
 
     # SQLite 是记忆状态的准确信息来源。即使旧向量还留在 Chroma，
     # 只要数据库将它标记为 superseded，就不能再把它传给模型。
@@ -205,12 +211,20 @@ def search_memories(
             # Chroma 中的失效记录或 SQLite 已不存在的孤儿向量都跳过。
             if memory_id not in active_ids:
                 continue
+            # 距离越小通常越接近；距离超过阈值的结果虽然是“最接近的几条”，
+            # 但仍可能与当前问题无关，因此不能继续传给 Agent。
+            distance = distances[index] if index < len(distances) else None
+            if (
+                distance_threshold is not None
+                and (distance is None or distance > distance_threshold)
+            ):
+                continue
             memories.append(
                 {
                     "id": memory_id,
                     "content": documents[index],
                     "memory_type": metadatas[index].get("memory_type"),
-                    "distance": distances[index] if index < len(distances) else None,
+                    "distance": distance,
                 }
             )
 

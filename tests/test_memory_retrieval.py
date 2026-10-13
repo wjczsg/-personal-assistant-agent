@@ -28,7 +28,9 @@ class FakeMemoryCollection:
             "ids": [[row["id"] for row in selected]],
             "documents": [[row["content"] for row in selected]],
             "metadatas": [[{"memory_type": row["memory_type"]} for row in selected]],
-            "distances": [[float(index) for index, _ in enumerate(selected)]],
+            "distances": [
+                [row.get("distance", float(index)) for index, row in enumerate(selected)]
+            ],
         }
 
 
@@ -90,6 +92,24 @@ class MemoryRetrievalTests(unittest.TestCase):
         with patch("app.vector_store._memory_collection", collection):
             self.assertEqual(search_memories("alice", "目标"), [])
         self.assertEqual(collection.requested_counts, [])
+
+    def test_distance_threshold_filters_unrelated_active_memories(self) -> None:
+        relevant = self.make_record("alice", "我想从事 AI 应用开发")
+        unrelated = self.make_record("alice", "我周末喜欢看电影")
+        collection = FakeMemoryCollection([
+            {**relevant, "distance": 0.78},
+            {**unrelated, "distance": 1.25},
+        ])
+
+        with patch("app.vector_store._memory_collection", collection):
+            hits = search_memories("alice", "我未来想从事什么方向", distance_threshold=0.9)
+
+        self.assertEqual([item["id"] for item in hits], [relevant["id"]])
+        self.assertEqual(hits[0]["distance"], 0.78)
+
+    def test_negative_distance_threshold_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            search_memories("alice", "目标", distance_threshold=-0.1)
 
 
 if __name__ == "__main__":

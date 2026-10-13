@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # 天气服务地址。Open-Meteo 的接口不需要 API Key。
     weather_geocoding_url: str = "https://geocoding-api.open-meteo.com/v1/search"
     weather_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
+    # 长期记忆的 Chroma 距离阈值；距离越小通常越相关，超过阈值的结果不进入上下文。
+    # 0.9 是根据当前项目真实记忆和测试问题的初步距离分布得到的起始值，后续可在 .env 调整。
+    memory_distance_threshold: float = 0.9
 
     # 告诉 Pydantic 从项目根目录的 .env 文件读取配置。
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
