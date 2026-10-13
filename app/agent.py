@@ -19,6 +19,7 @@ from .database import (
     save_message,
 )
 from .tool_registry import execute_tool, get_tool_definitions
+from .tool_router import select_tool_route
 from .vector_store import search_memories
 
 # 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
@@ -154,11 +155,19 @@ class PersonalAssistantAgent:
         return self._record_tool("calculator", result)
 
     # 统一执行模型可用的工具，让所有工具共享同一条执行路径。
-    async def _execute_model_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    async def _execute_model_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        allowed_tool_names: tuple[str, ...] | None = None,
+    ) -> str:
         # 校验工具名称，避免模型调用未开放的工具。
         if name not in MODEL_TOOL_NAMES:
             # 把错误作为工具结果返回，让模型知道这次调用没有执行。
             return f"未开放给模型的工具：{name}"
+        # 路由结果存在时，模型只能执行本轮实际提供过的工具。
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            return f"当前问题未开放工具：{name}"
         # 模型的 arguments 必须解析为对象，才能作为函数参数使用。
         if not isinstance(arguments, dict):
             # 遇到数组或其他类型时给出明确提示。
@@ -294,6 +303,23 @@ class PersonalAssistantAgent:
         )
         # 创建本次请求的消息列表。
         messages = [system_message]
+        # 先选择本轮业务路由；组合问题会得到多个路由及工具并集。
+        route_decision = select_tool_route(
+            message,
+            needs_memory=should_search_memory(message),
+        )
+        selected_tool_names = route_decision.tool_names
+        # 路由后再次明确本轮工具白名单，避免系统提示词中的全量工具说明造成误解。
+        if selected_tool_names:
+            system_message["content"] += (
+                "本轮路由为 "
+                + ", ".join(route_decision.routes)
+                + "；本轮只允许使用这些工具："
+                + ", ".join(selected_tool_names)
+                + "。"
+            )
+        else:
+            system_message["content"] += "本轮路由为 chat；本轮没有可用工具，请直接回答。"
         # 从 Chroma 查询与当前问题语义相关的长期记忆。
         relevant_memories = await self._get_relevant_memories(message)
         # 只有检索到长期记忆时，才额外加入长期记忆上下文。
@@ -323,21 +349,23 @@ class PersonalAssistantAgent:
         # 按轮次请求模型，直到模型返回最终文字。
         for _ in range(max_tool_rounds):
             # 每一轮都读取当前允许使用的工具描述。
-            tool_definitions = get_tool_definitions(MODEL_TOOL_NAMES)
+            tool_definitions = get_tool_definitions(list(selected_tool_names))
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
                 # 从注册表读取当前允许使用的工具描述，与消息一起发送给模型。
+                request_body = {
+                    "model": settings.llm_model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                }
+                # 普通聊天没有工具时省略 tools 和 tool_choice，兼容不接受空工具列表的模型服务。
+                if tool_definitions:
+                    request_body["tools"] = tool_definitions
+                    request_body["tool_choice"] = "auto"
                 response = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                    json={
-                        "model": settings.llm_model,
-                        "messages": messages,
-                        # auto 允许模型选择工具、继续调用下一个工具，或者直接回答。
-                        "tools": tool_definitions,
-                        "tool_choice": "auto",
-                        "temperature": 0.7,
-                    },
+                    json=request_body,
                 )
                 # 如果服务返回错误，就抛出异常，方便我们发现配置问题。
                 response.raise_for_status()
@@ -369,7 +397,11 @@ class PersonalAssistantAgent:
                     # 将 JSON 参数文本转成 Python 对象；时间工具通常返回空对象 {}。
                     arguments = json.loads(arguments_text)
                     # 按名称通过注册表执行工具，并记录实际调用结果。
-                    tool_result = await self._execute_model_tool(function_name, arguments)
+                    tool_result = await self._execute_model_tool(
+                        function_name,
+                        arguments,
+                        selected_tool_names,
+                    )
                 # JSON 错误、缺失参数和类型错误都属于可反馈给模型的参数问题。
                 except (ValueError, KeyError, TypeError) as exc:
                     # 模型下一轮可以根据这个结果修正参数。
