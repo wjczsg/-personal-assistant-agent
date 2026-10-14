@@ -1,0 +1,10 @@
+.git
+.idea
+.venv
+__pycache__
+*.pyc
+.env
+assistant.db
+chroma_data
+tests
+README.md
