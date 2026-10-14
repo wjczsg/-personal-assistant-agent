@@ -10,6 +10,7 @@ import httpx
 from typing import Any
 # 导入配置、记忆和工具函数。
 from .config import settings
+from .context_budget import ContextBudgetExceeded, build_context
 from .database import (
     apply_todo_proposal,
     cancel_todo_proposal,
@@ -301,8 +302,6 @@ class PersonalAssistantAgent:
             "仅根据确实相关的片段回答文档问题，并标明文件名和片段编号；"
             "找不到依据时明确说明，检索故障时也不要凭常识猜测文档内容。"
         )
-        # 创建本次请求的消息列表。
-        messages = [system_message]
         # 先选择本轮业务路由；组合问题会得到多个路由及工具并集。
         route_decision = select_tool_route(
             message,
@@ -322,6 +321,7 @@ class PersonalAssistantAgent:
             system_message["content"] += "本轮路由为 chat；本轮没有可用工具，请直接回答。"
         # 从 Chroma 查询与当前问题语义相关的长期记忆。
         relevant_memories = await self._get_relevant_memories(message)
+        memory_messages: list[dict[str, Any]] = []
         # 只有检索到长期记忆时，才额外加入长期记忆上下文。
         if relevant_memories:
             # 把每条记忆整理成模型容易理解的文本。
@@ -330,7 +330,7 @@ class PersonalAssistantAgent:
                 for item in relevant_memories
             ]
             # 把长期记忆作为独立的系统消息加入上下文。
-            messages.append({
+            memory_messages.append({
                 "role": "system",
                 "content": (
                     "以下是从当前用户的长期记忆库中检索到的相关信息，"
@@ -339,23 +339,32 @@ class PersonalAssistantAgent:
                     + "\n".join(memory_lines)
                 ),
             })
-        # 文档片段不在这里提前检索；模型真正调用工具后才进入 messages。
-        # 把数据库中的历史消息加入上下文。
-        messages.extend(memory)
-        # 把用户当前问题加入上下文。
-        messages.append({"role": "user", "content": message})
+        # 文档片段不在这里提前检索；模型调用后进入本轮工具消息。
+        current_message = {"role": "user", "content": message}
+        tool_messages: list[dict[str, Any]] = []
         # 限制工具调用轮数，既支持多工具连续调用，也防止模型异常时无限循环。
         max_tool_rounds = 3
         # 按轮次请求模型，直到模型返回最终文字。
         for _ in range(max_tool_rounds):
             # 每一轮都读取当前允许使用的工具描述。
             tool_definitions = get_tool_definitions(list(selected_tool_names))
+            # 每轮都重新选择历史：新产生的工具结果会占用输入预算。
+            # 本轮工具调用和结果必须完整保留，因此先从旧历史中腾出空间。
+            budget_result = build_context(
+                system_message=system_message,
+                memory_messages=memory_messages,
+                history=memory,
+                current_message=current_message,
+                tool_messages=tool_messages,
+                tool_definitions=tool_definitions,
+                input_limit=settings.context_input_budget_tokens,
+            )
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
                 # 从注册表读取当前允许使用的工具描述，与消息一起发送给模型。
                 request_body = {
                     "model": settings.llm_model,
-                    "messages": messages,
+                    "messages": budget_result.messages,
                     "temperature": 0.7,
                 }
                 # 普通聊天没有工具时省略 tools 和 tool_choice，兼容不接受空工具列表的模型服务。
@@ -380,7 +389,7 @@ class PersonalAssistantAgent:
                 # 返回模型生成的自然语言；content 为空时给出兜底文字。
                 return assistant_message.get("content") or "我暂时没有生成有效回答。"
             # 把模型的工具调用消息放回上下文，下一轮模型才能知道自己刚才请求了什么。
-            messages.append(assistant_message)
+            tool_messages.append(assistant_message)
             # 逐个处理模型提出的工具调用。
             for tool_call in tool_calls:
                 # 读取模型要求调用的函数名称。
@@ -407,7 +416,7 @@ class PersonalAssistantAgent:
                     # 模型下一轮可以根据这个结果修正参数。
                     tool_result = f"工具参数错误：{exc}"
                 # 把工具执行结果以 tool 消息放回对话上下文。
-                messages.append(
+                tool_messages.append(
                     {
                         # 指定这条消息来自工具。
                         "role": "tool",
@@ -423,7 +432,8 @@ class PersonalAssistantAgent:
     # Agent 对外提供的主入口。
     async def run(self, message: str) -> tuple[str, list[dict[str, str]], int]:
         # 查询这个用户最近的消息，作为 Agent 的记忆。
-        memory = get_recent_messages(self.user_id)
+        # 多取一些历史作为候选，再由输入预算决定本轮实际发送多少。
+        memory = get_recent_messages(self.user_id, limit=100)
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
         # 确认/取消是新一条用户消息触发的后端操作，不让模型在提案当轮替用户批准。
@@ -444,6 +454,19 @@ class PersonalAssistantAgent:
         # 普通问题交给大模型处理。
         try:
             answer = await self._ask_llm(message, memory)
+        except ContextBudgetExceeded as exc:
+            # 必需内容本身超限时给出可操作提示，不继续发送注定超限的请求。
+            if self.proposed_todos:
+                answer = self._proposal_reply()
+            elif self.tool_calls:
+                # 工具可能已经修改数据，不能让用户误以为操作没有发生并再次提交。
+                tool_names = "、".join(item["name"] for item in self.tool_calls)
+                answer = (
+                    f"本轮工具已执行（{tool_names}），但后续模型请求超出上下文预算。"
+                    "请先查看下方工具结果；不要直接重复执行可能修改数据的操作。"
+                )
+            else:
+                answer = str(exc)
         except Exception:
             # 提案已保存时，即使模型后续生成回答失败，也要把提案编号明确交给用户。
             if not self.proposed_todos:

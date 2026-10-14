@@ -1,6 +1,7 @@
 ﻿# 从 pathlib 导入 Path，方便我们用跨平台的方式处理文件路径。
 from pathlib import Path
 # 从 pydantic_settings 导入 BaseSettings，让程序可以读取 .env 配置文件。
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 定义整个项目的配置对象。
@@ -11,6 +12,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     # 要调用的模型名称。
     llm_model: str = "gpt-4o-mini"
+    # 每轮模型请求允许使用的输入预算；这是项目自己的成本上限，不是模型硬上限。
+    context_input_budget_tokens: int = Field(default=12000, gt=0)
     # SQLite 数据库文件名。
     database_file: str = "assistant.db"
     # 天气服务地址。Open-Meteo 的接口不需要 API Key。
