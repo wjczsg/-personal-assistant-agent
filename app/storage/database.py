@@ -5,7 +5,7 @@ from datetime import datetime
 # 导入 Any，表示某个数据的类型暂时不限制。
 from typing import Any
 # 导入项目配置中的数据库路径。
-from .config import DATABASE_PATH
+from ..config import DATABASE_PATH
 
 # 打开数据库连接，并设置行可以像字典一样读取。
 def get_connection() -> sqlite3.Connection:

@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
-from app.database import (
+from app.assistant.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
+from app.storage.database import (
     create_todo_proposal,
     init_database,
     list_pending_todo_proposals,
     list_todos,
 )
-from app.tool_registry import get_tool_definitions
+from app.tooling.tool_registry import get_tool_definitions
 
 
 class TodoReplyConfirmationTests(unittest.IsolatedAsyncioTestCase):
@@ -21,7 +21,7 @@ class TodoReplyConfirmationTests(unittest.IsolatedAsyncioTestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         database_patcher = patch(
-            "app.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
+            "app.storage.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
         )
         database_patcher.start()
         self.addCleanup(database_patcher.stop)

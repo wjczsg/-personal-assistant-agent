@@ -4,8 +4,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
-from app.tool_registry import execute_tool, get_tool_definitions
+from app.assistant.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
+from app.tooling.tool_registry import execute_tool, get_tool_definitions
 
 
 class FakeResponse:
@@ -54,10 +54,10 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         # 模型直接回答时，Agent 不应先替它查文档。
         client = FakeAsyncClient([{"role": "assistant", "content": "你好！"}])
         agent = PersonalAssistantAgent("alice")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.search_memories", return_value=[]), \
-                patch("app.tool_registry.search_document_chunks") as search:
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.search_memories", return_value=[]), \
+                patch("app.tooling.tool_registry.search_document_chunks") as search:
             answer = await agent._ask_llm("你好", [])
         self.assertEqual(answer, "你好！")
         search.assert_not_called()
@@ -91,10 +91,10 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
             "distance": 0.2,
         }
         agent = PersonalAssistantAgent("alice")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.search_memories", return_value=[]), \
-                patch("app.tool_registry.search_document_chunks", return_value=[hit]) as search:
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.search_memories", return_value=[]), \
+                patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
             answer = await agent._ask_llm(question, [])
 
         search.assert_called_once_with("alice", question, 3)
@@ -112,14 +112,14 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_index_and_search_failure_have_different_messages(self) -> None:
         # 空结果与 Chroma 故障不能混为一谈，否则模型可能编造答案。
-        with patch("app.tool_registry.search_document_chunks", return_value=[]):
+        with patch("app.tooling.tool_registry.search_document_chunks", return_value=[]):
             empty = await execute_tool(
                 "search_uploaded_documents", {"query": "我的文档"}, "alice"
             )
         self.assertIn("没有可检索", empty)
 
-        with patch("app.tool_registry.search_document_chunks", side_effect=RuntimeError("offline")), \
-                patch("app.tool_registry.logger"):
+        with patch("app.tooling.tool_registry.search_document_chunks", side_effect=RuntimeError("offline")), \
+                patch("app.tooling.tool_registry.logger"):
             failed = await execute_tool(
                 "search_uploaded_documents", {"query": "我的文档"}, "alice"
             )

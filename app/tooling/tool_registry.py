@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 from langchain_core.tools import tool
 
 # 添加待办时只创建提案，不直接写入 todos；确认发生在用户的下一条消息。
-from .database import create_todo_proposal
+from ..storage.database import create_todo_proposal
 # 导入真正执行工作的工具函数。
 from .tools import (
     calculator,
@@ -26,7 +26,7 @@ from .tools import (
     save_memory,
     update_todo,
 )
-from .vector_store import search_document_chunks
+from ..storage.vector_store import search_document_chunks
 
 logger = logging.getLogger(__name__)
 

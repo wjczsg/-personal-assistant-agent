@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.database import init_database, list_memory_records, save_memory_record, supersede_memory_record
+from app.storage.database import init_database, list_memory_records, save_memory_record, supersede_memory_record
 
 
 class MemoryStatusTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class MemoryStatusTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.database_path = Path(directory.name) / "assistant.db"
-        database_patcher = patch("app.database.DATABASE_PATH", self.database_path)
+        database_patcher = patch("app.storage.database.DATABASE_PATH", self.database_path)
         database_patcher.start()
         self.addCleanup(database_patcher.stop)
 

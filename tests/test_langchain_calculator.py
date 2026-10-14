@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.tool_registry import execute_tool, langchain_calculator
+from app.tooling.tool_registry import execute_tool, langchain_calculator
 
 
 class LangChainCalculatorTests(unittest.IsolatedAsyncioTestCase):

@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.tool_router import select_tool_route
+from app.assistant.tool_router import select_tool_route
 
 
 class ToolRoutingTests(unittest.TestCase):

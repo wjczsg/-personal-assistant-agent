@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.agent import PersonalAssistantAgent
+from app.assistant.agent import PersonalAssistantAgent
 
 
 class FakeResponse:
@@ -86,9 +86,9 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             return json.dumps({"proposal_id": 7, "content": "出门带伞", "status": "pending"})
 
         agent = PersonalAssistantAgent("test-user")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("如果明天下雨，就帮我添加带伞待办", [])
 
         # 验证两个工具按照依赖顺序执行，并且最终回答来自第三轮模型响应。
@@ -137,9 +137,9 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             return "已完成待办 #5：整理简历"
 
         agent = PersonalAssistantAgent("test-user")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("我完成了整理简历", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "complete_todo"])
@@ -185,9 +185,9 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             return "已删除待办 #5：整理简历"
 
         agent = PersonalAssistantAgent("test-user")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("把整理简历这条待办删除", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "delete_todo"])
@@ -234,9 +234,9 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
             return "已修改待办 #5：整理简历 → 周日完善简历"
 
         agent = PersonalAssistantAgent("test-user")
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.agent.execute_tool", side_effect=fake_execute_tool):
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("把整理简历改成周日完善简历", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "update_todo"])

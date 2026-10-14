@@ -9,9 +9,9 @@ import httpx
 # 导入类型提示工具。
 from typing import Any
 # 导入配置、记忆和工具函数。
-from .config import settings
+from ..config import settings
 from .context_budget import ContextBudgetExceeded, build_context
-from .database import (
+from ..storage.database import (
     apply_todo_proposal,
     cancel_todo_proposal,
     get_conversation_summary,
@@ -20,14 +20,14 @@ from .database import (
     list_pending_todo_proposals,
     save_message,
 )
-from .tool_registry import execute_tool, get_tool_definitions
+from ..tooling.tool_registry import execute_tool, get_tool_definitions
 from .tool_router import select_tool_route
 from .history_summary import (
     SUMMARY_BATCHES_PER_REQUEST,
     refresh_summary_if_needed,
     summary_message,
 )
-from .vector_store import search_memories
+from ..storage.vector_store import search_memories
 
 # 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
 # 这不是最终的语义判断，而是一个低成本的“是否值得检索”门控，
@@ -363,6 +363,7 @@ class PersonalAssistantAgent:
             if self._summary_state is not None:
                 # 工具结果会增加后续轮次的输入量；每轮都检查是否还有旧历史需要摘要。
                 remaining = SUMMARY_BATCHES_PER_REQUEST - summary_calls_used
+                # 【摘要流程 2～5/6】每轮先判断是否需要把放不下的旧问答更新为摘要。
                 if self._history_upper_id and remaining > 0:
                     self._summary_state, memory, calls_made = await refresh_summary_if_needed(
                         user_id=self.user_id,
@@ -382,6 +383,7 @@ class PersonalAssistantAgent:
                     summary_messages.append(summary_message(self._summary_state["summary"]))
             # 每轮都重新选择历史：新产生的工具结果会占用输入预算。
             # 本轮工具调用和结果必须完整保留，因此先从旧历史中腾出空间。
+            # 【摘要流程 6/6】把摘要、最近问答原文和当前问题一起放进回答模型的输入。
             budget_result = build_context(
                 system_message=system_message,
                 memory_messages=memory_messages,
@@ -466,6 +468,7 @@ class PersonalAssistantAgent:
     async def run(self, message: str) -> tuple[str, list[dict[str, str]], int]:
         # 查询这个用户最近的消息，作为 Agent 的记忆。
         # 多取一些历史作为候选，再由输入预算决定本轮实际发送多少。
+        # 【摘要流程 1/6】先读旧聊天，再保存本次问题；本次未回答的问题不能当作旧问答总结。
         records = get_recent_message_records(self.user_id, limit=100)
         memory = [{"role": row["role"], "content": row["content"]} for row in records]
         # 先保存用户本次输入。
@@ -486,6 +489,7 @@ class PersonalAssistantAgent:
             # 返回回答、工具调用记录和记忆数量。
             return answer, self.tool_calls, len(memory)
         # 普通问题交给大模型处理。
+        # 【摘要流程 1/6】记住旧聊天的末尾 ID，并读取上次保存的摘要及处理进度。
         self._history_records = records
         self._history_upper_id = int(records[-1]["id"]) if records else 0
         self._summary_state = get_conversation_summary(self.user_id)

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.database import init_database, save_memory_record, supersede_memory_record
-from app.vector_store import search_memories
+from app.storage.database import init_database, save_memory_record, supersede_memory_record
+from app.storage.vector_store import search_memories
 
 
 class FakeMemoryCollection:
@@ -40,7 +40,7 @@ class MemoryRetrievalTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         database_patcher = patch(
-            "app.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
+            "app.storage.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
         )
         database_patcher.start()
         self.addCleanup(database_patcher.stop)
@@ -66,7 +66,7 @@ class MemoryRetrievalTests(unittest.TestCase):
             supersede_memory_record("alice", int(record["id"]), int(current["id"]))
 
         collection = FakeMemoryCollection(old + [other_user, current, another])
-        with patch("app.vector_store._memory_collection", collection):
+        with patch("app.storage.vector_store._memory_collection", collection):
             hits = search_memories("alice", "求职方向", limit=2)
 
         # 先取 2 条，发现不够再扩到 4、6 条；最终只把有效记忆返回 Agent。
@@ -78,7 +78,7 @@ class MemoryRetrievalTests(unittest.TestCase):
         old = self.make_record("alice", "想找 AI 实习")
         current = self.make_record("alice", "改找 Java 实习")
         collection = FakeMemoryCollection([old, current])
-        with patch("app.vector_store._memory_collection", collection):
+        with patch("app.storage.vector_store._memory_collection", collection):
             before = search_memories("alice", "实习", limit=1)
             supersede_memory_record("alice", int(old["id"]), int(current["id"]))
             after = search_memories("alice", "实习", limit=1)
@@ -89,7 +89,7 @@ class MemoryRetrievalTests(unittest.TestCase):
     def test_no_active_memory_does_not_query_chroma(self) -> None:
         # 即使 Chroma 残留孤儿向量，SQLite 没有有效记录时也不应返回它。
         collection = FakeMemoryCollection([{"id": "999", "user_id": "alice"}])
-        with patch("app.vector_store._memory_collection", collection):
+        with patch("app.storage.vector_store._memory_collection", collection):
             self.assertEqual(search_memories("alice", "目标"), [])
         self.assertEqual(collection.requested_counts, [])
 
@@ -101,7 +101,7 @@ class MemoryRetrievalTests(unittest.TestCase):
             {**unrelated, "distance": 1.25},
         ])
 
-        with patch("app.vector_store._memory_collection", collection):
+        with patch("app.storage.vector_store._memory_collection", collection):
             hits = search_memories("alice", "我未来想从事什么方向", distance_threshold=0.9)
 
         self.assertEqual([item["id"] for item in hits], [relevant["id"]])

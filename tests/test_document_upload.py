@@ -11,7 +11,7 @@ from unittest.mock import patch
 # TestClient 像浏览器一样请求 FastAPI，但不需要手动启动服务器。
 from fastapi.testclient import TestClient
 
-from app.database import get_connection, init_database
+from app.storage.database import get_connection, init_database
 from app.main import app
 
 
@@ -21,10 +21,10 @@ class DocumentUploadTests(unittest.TestCase):
         # 创建独立文件夹，并登记“测试结束后删除文件夹”。
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
-        # 数据库代码读取的是 app.database.DATABASE_PATH；这里临时改成测试目录。
+        # 数据库代码读取的是 app.storage.database.DATABASE_PATH；这里临时改成测试目录。
         # patch 只在本测试期间生效，结束后通过 addCleanup 恢复原路径。
         database_patcher = patch(
-            "app.database.DATABASE_PATH",
+            "app.storage.database.DATABASE_PATH",
             Path(temporary_directory.name) / "assistant.db",
         )
         database_patcher.start()

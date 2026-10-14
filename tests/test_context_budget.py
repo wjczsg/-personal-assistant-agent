@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.context_budget import ContextBudgetExceeded, build_context, estimate_tokens
+from app.assistant.context_budget import ContextBudgetExceeded, build_context, estimate_tokens
 
 
 SYSTEM = {"role": "system", "content": "你是个人助理。"}

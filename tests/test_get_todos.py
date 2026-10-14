@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.database import add_todo, init_database, list_todos
-from app.tool_registry import execute_tool, get_tool_definitions
+from app.storage.database import add_todo, init_database, list_todos
+from app.tooling.tool_registry import execute_tool, get_tool_definitions
 
 
 class GetTodosTests(unittest.IsolatedAsyncioTestCase):
@@ -15,7 +15,7 @@ class GetTodosTests(unittest.IsolatedAsyncioTestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         database_patcher = patch(
-            "app.database.DATABASE_PATH",
+            "app.storage.database.DATABASE_PATH",
             Path(temporary_directory.name) / "assistant.db",
         )
         database_patcher.start()

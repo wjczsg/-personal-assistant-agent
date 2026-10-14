@@ -7,16 +7,16 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
-from .agent import PersonalAssistantAgent
-from .database import (
+from .assistant.agent import PersonalAssistantAgent
+from .storage.database import (
     apply_todo_proposal,
     cancel_todo_proposal,
     create_todo_proposal,
     init_database,
     save_document,
 )
-from .document_indexing import DocumentNotFoundError, index_uploaded_document
-from .schemas import (
+from .documents.document_indexing import DocumentNotFoundError, index_uploaded_document
+from .api.schemas import (
     ChatRequest,
     ChatResponse,
     DocumentIndexRequest,
@@ -29,7 +29,7 @@ from .schemas import (
     TodoProposalResponse,
     ToolCall,
 )
-from .vector_store import search_document_chunks
+from .storage.vector_store import search_document_chunks
 
 logger = logging.getLogger(__name__)
 

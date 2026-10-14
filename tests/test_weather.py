@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import httpx
 
-from app.tool_registry import execute_tool, get_tool_definitions
-from app.tools import get_weather
+from app.tooling.tool_registry import execute_tool, get_tool_definitions
+from app.tooling.tools import get_weather
 
 
 class WeatherDateTests(unittest.IsolatedAsyncioTestCase):
@@ -39,7 +39,7 @@ class WeatherDateTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_keeps_current_weather(self):
         requests = []
         client = self.make_client(requests)
-        with patch("app.tools.httpx.AsyncClient", return_value=client):
+        with patch("app.tooling.tools.httpx.AsyncClient", return_value=client):
             result = await get_weather("北京")
         self.assertIn("当前天气", result)
         self.assertIn("current", requests[0].url.params)
@@ -47,7 +47,7 @@ class WeatherDateTests(unittest.IsolatedAsyncioTestCase):
     async def test_tomorrow_uses_city_local_daily_forecast(self):
         requests = []
         client = self.make_client(requests)
-        with patch("app.tools.httpx.AsyncClient", return_value=client):
+        with patch("app.tooling.tools.httpx.AsyncClient", return_value=client):
             result = await execute_tool("get_weather", {"city": "北京", "date": "tomorrow"})
         self.assertIn("2026-10-11 天气预报", result)
         self.assertIn("最高降水概率 10%", result)
@@ -57,13 +57,13 @@ class WeatherDateTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_date_and_out_of_range(self):
         requests = []
         client = self.make_client(requests)
-        with patch("app.tools.httpx.AsyncClient", return_value=client):
+        with patch("app.tooling.tools.httpx.AsyncClient", return_value=client):
             in_range = await get_weather("北京", "2026-10-12")
         self.assertIn("2026-10-12 天气预报", in_range)
 
         requests = []
         client = self.make_client(requests)
-        with patch("app.tools.httpx.AsyncClient", return_value=client):
+        with patch("app.tooling.tools.httpx.AsyncClient", return_value=client):
             out_of_range = await get_weather("北京", "2026-11-01")
         self.assertIn("暂时只能查询", out_of_range)
         self.assertIn("2026-10-25", out_of_range)

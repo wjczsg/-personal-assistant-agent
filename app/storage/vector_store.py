@@ -11,10 +11,9 @@ import chromadb
 from .database import get_active_memory_ids
 
 
-# 获取当前文件所在的 app 文件夹路径。
-APP_DIR = Path(__file__).resolve().parent
-# 获取项目根目录路径，也就是 app 文件夹的上一级目录。
-PROJECT_DIR = APP_DIR.parent
+# 文件搬到 app/storage 后，项目根目录需要向上走两级。
+# 保持原来的 chroma_data 位置不变，已有向量索引才不会“消失”。
+PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 # 指定 Chroma 本地数据的保存位置。
 # 这里的向量数据不会保存到代码文件中，而是保存到这个文件夹里。
 CHROMA_PATH = PROJECT_DIR / "chroma_data"

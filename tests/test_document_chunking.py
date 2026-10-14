@@ -1,7 +1,7 @@
 """验证文档分块的边界规则；不依赖网页或向量数据库。"""
 
 import unittest
-from app.document_chunking import split_document_text
+from app.documents.document_chunking import split_document_text
 
 
 class SplitDocumentTextTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 """把 SQLite 中的一篇上传文档分块，再交给 Chroma 建立向量索引。"""
 
-from .database import get_document
+from ..storage.database import get_document
 from .document_chunking import split_document_text
-from .vector_store import index_document_chunks
+from ..storage.vector_store import index_document_chunks
 
 
 class DocumentNotFoundError(Exception):

@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import vector_store
-from app.database import get_connection, init_database, save_document
+from app.storage import vector_store
+from app.storage.database import get_connection, init_database, save_document
 from app.main import app
 
 
@@ -69,7 +69,7 @@ class DocumentIndexingTests(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         database_patcher = patch(
-            "app.database.DATABASE_PATH",
+            "app.storage.database.DATABASE_PATH",
             Path(temporary_directory.name) / "assistant.db",
         )
         database_patcher.start()
@@ -78,7 +78,7 @@ class DocumentIndexingTests(unittest.TestCase):
 
         # 将文档集合替换成模拟对象，测试不下载 Embedding 模型。
         self.collection = FakeDocumentCollection()
-        collection_patcher = patch("app.vector_store._document_collection", self.collection)
+        collection_patcher = patch("app.storage.vector_store._document_collection", self.collection)
         collection_patcher.start()
         self.addCleanup(collection_patcher.stop)
         self.client = TestClient(app)
@@ -130,7 +130,7 @@ class DocumentIndexingTests(unittest.TestCase):
         self.assertEqual(len(self.collection.rows), original_count)
 
         # 模拟以后分块规则改变，只剩一块；其余旧块应被清理。
-        with patch("app.document_indexing.split_document_text", return_value=["新的短片段"]):
+        with patch("app.documents.document_indexing.split_document_text", return_value=["新的短片段"]):
             third = self.index(document_id)
         self.assertEqual(third.status_code, 200)
         self.assertEqual(list(self.collection.rows), [f"document:{document_id}:chunk:1"])

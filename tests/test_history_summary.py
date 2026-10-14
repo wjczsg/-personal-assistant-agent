@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from app.agent import PersonalAssistantAgent
-from app.database import (
+from app.assistant.agent import PersonalAssistantAgent
+from app.storage.database import (
     get_conversation_summary,
     get_message_records_after,
     get_recent_message_records,
@@ -14,7 +14,11 @@ from app.database import (
     save_conversation_summary,
     save_message,
 )
-from app.history_summary import choose_summary_batch
+from app.assistant.history_summary import (
+    SUMMARY_GENERATION_MAX_TOKENS,
+    choose_summary_batch,
+    generate_summary,
+)
 
 
 class FakeResponse:
@@ -40,12 +44,41 @@ class FakeAsyncClient:
         return FakeResponse()
 
 
+class FakeSummaryResponse:
+    """【本次测试】伪造摘要接口的 JSON，避免测试时真的花钱调用模型。"""
+
+    def __init__(self, body: dict) -> None:
+        self.body = body
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        return self.body
+
+
+class FakeSummaryClient:
+    def __init__(self, body: dict) -> None:
+        self.body = body
+        self.requests: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def post(self, *args, **kwargs) -> FakeSummaryResponse:
+        self.requests.append(kwargs["json"])
+        return FakeSummaryResponse(self.body)
+
+
 class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # 使用临时 SQLite，绝不改动项目真实的聊天记录。
         self.directory = tempfile.TemporaryDirectory()
         self.database_patcher = patch(
-            "app.database.DATABASE_PATH", Path(self.directory.name) / "assistant.db"
+            "app.storage.database.DATABASE_PATH", Path(self.directory.name) / "assistant.db"
         )
         self.database_patcher.start()
         init_database()
@@ -88,15 +121,50 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["content"] for row in chosen], ["已完成的问题", "已完成的回答"])
         self.assertEqual(cursor, rows[1]["id"])
 
+    async def test_summary_uses_low_thinking_and_accepts_complete_response(self) -> None:
+        # 【本次测试】只给 DeepSeek 的摘要请求设置低强度思考；完整结束才得到摘要。
+        client = FakeSummaryClient({
+            "choices": [{"finish_reason": "stop", "message": {"content": "主方向：Java。"}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 30,
+                      "completion_tokens_details": {"reasoning_tokens": 10}},
+        })
+        with patch("app.assistant.history_summary.settings.llm_model", "deepseek-flash"), \
+                patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+            summary = await generate_summary("", [])
+        self.assertEqual(summary, "主方向：Java。")
+        self.assertEqual(client.requests[0]["reasoning_effort"], "low")
+        self.assertEqual(client.requests[0]["max_tokens"], SUMMARY_GENERATION_MAX_TOKENS)
+
+    async def test_summary_rejects_truncated_even_if_text_is_nonempty(self) -> None:
+        # 【本次测试】有半句正文不代表生成完成；length 必须拒绝。
+        client = FakeSummaryClient({
+            "choices": [{"finish_reason": "length", "message": {"content": "主方向是"}}],
+        })
+        with patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+            with self.assertRaisesRegex(ValueError, "finish_reason='length'"):
+                await generate_summary("", [])
+
+    async def test_summary_rejects_empty_and_unconfirmed_responses(self) -> None:
+        # 【本次测试】正常结束但空白、或没有结束原因，都不应进入数据库。
+        for choice in (
+            {"finish_reason": "stop", "message": {"content": "  "}},
+            {"message": {"content": "看似完整的半句"}},
+        ):
+            client = FakeSummaryClient({"choices": [choice]})
+            with self.subTest(choice=choice), \
+                    patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+                with self.assertRaises(ValueError):
+                    await generate_summary("", [])
+
     async def test_agent_sends_summary_plus_recent_text_after_budget_overflow(self) -> None:
         for index in range(25):
             save_message("alice", "user", f"第 {index} 轮问题：" + "学习项目进度" * 35)
             save_message("alice", "assistant", f"第 {index} 轮回答：" + "已讨论架构" * 35)
         before = get_recent_message_records("alice")[-1]["id"]
         client = FakeAsyncClient()
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.history_summary.generate_summary", new_callable=AsyncMock, return_value="已讨论项目架构和进度。") as summarize:
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.history_summary.generate_summary", new_callable=AsyncMock, return_value="已讨论项目架构和进度。") as summarize:
             answer, _, _ = await PersonalAssistantAgent("alice").run("请继续讲下一步。")
 
         self.assertEqual(answer, "收到。")
@@ -115,10 +183,10 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
             save_message("alice", "user", f"旧问题 {index}" + "内容" * 100)
             save_message("alice", "assistant", f"旧回答 {index}" + "内容" * 100)
         client = FakeAsyncClient()
-        with patch("app.agent.settings.llm_api_key", "test-key"), \
-                patch("app.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.history_summary.logger"), \
-                patch("app.history_summary.generate_summary", new_callable=AsyncMock, side_effect=ValueError("摘要暂不可用")):
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.history_summary.logger"), \
+                patch("app.assistant.history_summary.generate_summary", new_callable=AsyncMock, side_effect=ValueError("摘要暂不可用")):
             answer, _, _ = await PersonalAssistantAgent("alice").run("继续聊天。")
         self.assertEqual(answer, "收到。")
         self.assertEqual(get_conversation_summary("alice")["last_message_id"], 0)

@@ -242,22 +242,29 @@ MEMORY_DISTANCE_THRESHOLD=0.9
 
 ```text
 app/
-├── main.py           # FastAPI 入口、网页和聊天接口
-├── agent.py          # 对话组织、记忆检索门控和模型工具调用循环
-├── context_budget.py # 输入预算估算、最近历史选择和超限处理
-├── history_summary.py # 旧问答滚动摘要、分批触发和失败回退
-├── tool_router.py     # 天气、待办、文档、记忆和普通聊天的动态工具路由
-├── tool_registry.py  # 给模型看的工具定义及工具执行映射
-├── tools.py          # 计算器、时间、天气、待办和记忆工具的具体逻辑
-├── database.py       # SQLite：对话与摘要、待办、长期记忆和上传文档原文
-├── document_chunking.py # 文档原文的分块规则
-├── document_indexing.py # 读取原文、分块并触发文档索引
-├── vector_store.py   # Chroma：长期记忆检索、文档片段索引与检索
-├── config.py         # .env 配置读取
-├── schemas.py        # 接口请求与响应的数据格式
-└── static/           # 网页的 HTML、CSS 和 JavaScript
-tests/                # 自动化测试
+├── main.py                 # FastAPI 入口；启动命令仍是 app.main:app
+├── config.py               # .env 配置读取与数据库路径
+├── api/
+│   └── schemas.py          # 接口请求与响应的数据格式
+├── assistant/
+│   ├── agent.py            # 对话主流程、记忆检索与工具调用循环
+│   ├── context_budget.py   # 上下文输入预算
+│   ├── history_summary.py  # 旧对话滚动摘要
+│   └── tool_router.py      # 本轮需要哪些工具的路由
+├── tooling/
+│   ├── tool_registry.py    # 工具定义及执行映射
+│   └── tools.py            # 天气、待办、计算器等具体工具逻辑
+├── storage/
+│   ├── database.py         # SQLite：对话、摘要、待办、记忆和文档原文
+│   └── vector_store.py     # Chroma：记忆与文档片段的向量索引
+├── documents/
+│   ├── document_chunking.py # 文档分块规则
+│   └── document_indexing.py # 读取原文、分块并建立索引
+└── static/                 # 网页的 HTML、CSS 和 JavaScript
+tests/                      # 自动化测试
 ```
+
+查代码时可以按流程找：网页请求先到 `app/main.py`，聊天逻辑在 `app/assistant/agent.py`，工具在 `app/tooling/`，数据读写在 `app/storage/`，上传文档的预处理在 `app/documents/`。这次只调整了文件位置与导入路径，没有搬动 `assistant.db` 或 `chroma_data/`；原来的启动命令保持不变。
 
 运行测试：
 

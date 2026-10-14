@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.database import get_todo_proposal, init_database, list_todos
+from app.storage.database import get_todo_proposal, init_database, list_todos
 from app.main import app
 
 
@@ -17,7 +17,7 @@ class TodoProposalApiTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         database_patcher = patch(
-            "app.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
+            "app.storage.database.DATABASE_PATH", Path(directory.name) / "assistant.db"
         )
         database_patcher.start()
         self.addCleanup(database_patcher.stop)

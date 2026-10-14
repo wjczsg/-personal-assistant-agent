@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.agent import should_search_memory
+from app.assistant.agent import should_search_memory
 
 
 class MemoryRoutingTests(unittest.TestCase):
