@@ -14,13 +14,19 @@ from .context_budget import ContextBudgetExceeded, build_context
 from .database import (
     apply_todo_proposal,
     cancel_todo_proposal,
-    get_recent_messages,
+    get_conversation_summary,
+    get_recent_message_records,
     get_todo_proposal,
     list_pending_todo_proposals,
     save_message,
 )
 from .tool_registry import execute_tool, get_tool_definitions
 from .tool_router import select_tool_route
+from .history_summary import (
+    SUMMARY_BATCHES_PER_REQUEST,
+    refresh_summary_if_needed,
+    summary_message,
+)
 from .vector_store import search_memories
 
 # 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
@@ -85,6 +91,10 @@ class PersonalAssistantAgent:
         self.tool_calls: list[dict[str, str]] = []
         # 只记录本轮由模型新建的提案；稍后用数据库里的真实内容生成确认提示。
         self.proposed_todos: list[dict[str, Any]] = []
+        # run() 中获取的带编号历史只供摘要定位；编号绝不作为聊天消息发给模型。
+        self._history_records: list[dict[str, Any]] = []
+        self._history_upper_id = 0
+        self._summary_state: dict[str, Any] | None = None
 
     # 统一记录工具调用，便于返回给前端学习观察。
     def _record_tool(self, name: str, result: str) -> str:
@@ -342,12 +352,34 @@ class PersonalAssistantAgent:
         # 文档片段不在这里提前检索；模型调用后进入本轮工具消息。
         current_message = {"role": "user", "content": message}
         tool_messages: list[dict[str, Any]] = []
+        tool_definitions = get_tool_definitions(list(selected_tool_names))
+        summary_calls_used = 0
         # 限制工具调用轮数，既支持多工具连续调用，也防止模型异常时无限循环。
         max_tool_rounds = 3
         # 按轮次请求模型，直到模型返回最终文字。
         for _ in range(max_tool_rounds):
-            # 每一轮都读取当前允许使用的工具描述。
-            tool_definitions = get_tool_definitions(list(selected_tool_names))
+            # 本轮工具定义固定；每次循环重新计算的是会增长的消息内容。
+            summary_messages: list[dict[str, Any]] = []
+            if self._summary_state is not None:
+                # 工具结果会增加后续轮次的输入量；每轮都检查是否还有旧历史需要摘要。
+                remaining = SUMMARY_BATCHES_PER_REQUEST - summary_calls_used
+                if self._history_upper_id and remaining > 0:
+                    self._summary_state, memory, calls_made = await refresh_summary_if_needed(
+                        user_id=self.user_id,
+                        state=self._summary_state,
+                        recent_records=self._history_records,
+                        history_upper_id=self._history_upper_id,
+                        system_message=system_message,
+                        memory_messages=memory_messages,
+                        current_message=current_message,
+                        tool_messages=tool_messages,
+                        tool_definitions=tool_definitions,
+                        input_limit=settings.context_input_budget_tokens,
+                        max_batches=remaining,
+                    )
+                    summary_calls_used += calls_made
+                if self._summary_state["summary"]:
+                    summary_messages.append(summary_message(self._summary_state["summary"]))
             # 每轮都重新选择历史：新产生的工具结果会占用输入预算。
             # 本轮工具调用和结果必须完整保留，因此先从旧历史中腾出空间。
             budget_result = build_context(
@@ -358,6 +390,7 @@ class PersonalAssistantAgent:
                 tool_messages=tool_messages,
                 tool_definitions=tool_definitions,
                 input_limit=settings.context_input_budget_tokens,
+                summary_messages=summary_messages,
             )
             # 创建异步 HTTP 客户端。
             async with httpx.AsyncClient(timeout=60) as client:
@@ -433,7 +466,8 @@ class PersonalAssistantAgent:
     async def run(self, message: str) -> tuple[str, list[dict[str, str]], int]:
         # 查询这个用户最近的消息，作为 Agent 的记忆。
         # 多取一些历史作为候选，再由输入预算决定本轮实际发送多少。
-        memory = get_recent_messages(self.user_id, limit=100)
+        records = get_recent_message_records(self.user_id, limit=100)
+        memory = [{"role": row["role"], "content": row["content"]} for row in records]
         # 先保存用户本次输入。
         save_message(self.user_id, "user", message)
         # 确认/取消是新一条用户消息触发的后端操作，不让模型在提案当轮替用户批准。
@@ -452,6 +486,9 @@ class PersonalAssistantAgent:
             # 返回回答、工具调用记录和记忆数量。
             return answer, self.tool_calls, len(memory)
         # 普通问题交给大模型处理。
+        self._history_records = records
+        self._history_upper_id = int(records[-1]["id"]) if records else 0
+        self._summary_state = get_conversation_summary(self.user_id)
         try:
             answer = await self._ask_llm(message, memory)
         except ContextBudgetExceeded as exc:

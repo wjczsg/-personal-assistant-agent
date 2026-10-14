@@ -62,6 +62,7 @@ def build_context(
     tool_messages: list[dict[str, Any]],
     tool_definitions: list[dict[str, Any]],
     input_limit: int,
+    summary_messages: list[dict[str, Any]] | None = None,
 ) -> ContextBudgetResult:
     """先保留本轮必需内容，再从最新到最旧放入完整历史对话轮次。"""
 
@@ -69,7 +70,9 @@ def build_context(
         raise ValueError("输入预算必须大于零。")
 
     # 工具调用消息与对应的 tool 结果必须一起保留，否则 API 会收到断裂的调用链。
-    required = [system_message, current_message, *tool_messages]
+    # 摘要覆盖了已排除的旧原文，因此若存在摘要，须为它保留位置。
+    summary_messages = summary_messages or []
+    required = [system_message, *summary_messages, current_message, *tool_messages]
     used = _request_tokens(required, tool_definitions)
     if used > input_limit:
         raise ContextBudgetExceeded(
@@ -79,7 +82,7 @@ def build_context(
 
     selected_memories: list[dict[str, Any]] = []
     for item in memory_messages:
-        candidate = [system_message, *selected_memories, item, current_message, *tool_messages]
+        candidate = [system_message, *summary_messages, *selected_memories, item, current_message, *tool_messages]
         cost = _request_tokens(candidate, tool_definitions)
         if cost <= input_limit:
             selected_memories.append(item)
@@ -90,7 +93,8 @@ def build_context(
         candidate_turns = [turn, *reversed(selected_turns)]
         candidate_history = [item for selected in candidate_turns for item in selected]
         candidate = [
-            system_message, *selected_memories, *candidate_history, current_message, *tool_messages
+            system_message, *summary_messages, *selected_memories,
+            *candidate_history, current_message, *tool_messages
         ]
         cost = _request_tokens(candidate, tool_definitions)
         if cost > input_limit:
@@ -99,7 +103,10 @@ def build_context(
         selected_turns.append(turn)
 
     selected_history = [item for turn in reversed(selected_turns) for item in turn]
-    messages = [system_message, *selected_memories, *selected_history, current_message, *tool_messages]
+    messages = [
+        system_message, *summary_messages, *selected_memories,
+        *selected_history, current_message, *tool_messages,
+    ]
     return ContextBudgetResult(
         messages=messages,
         estimated_tokens=_request_tokens(messages, tool_definitions),

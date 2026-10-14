@@ -10,8 +10,8 @@ services:
     environment:
       DATABASE_FILE: data/assistant.db
 
-    ports:
-      - "127.0.0.1:8000:8000"
+    expose:
+      - "8000"
 
     volumes:
       - personal_assistant_db:/app/data

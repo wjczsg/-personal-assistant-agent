@@ -32,6 +32,16 @@ def init_database() -> None:
                 created_at TEXT NOT NULL
             )
         """)
+        # 每个用户保留一份滚动对话摘要；last_message_id 是已总结的最后一条消息。
+        # 原始消息始终留在 messages 表，摘要只负责缩短发给模型的上下文。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_summaries (
+                user_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+        """)
         # 创建待办事项表，给 Agent 的记事工具使用。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS todos (
@@ -156,6 +166,100 @@ def get_recent_messages(user_id: str, limit: int = 10) -> list[dict[str, Any]]:
     connection.close()
     # 查询结果原来是倒序，这里翻转后恢复对话的正常顺序。
     return [dict(row) for row in reversed(rows)]
+
+
+def get_recent_message_records(user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    """读取带 ID 的最近消息，供滚动摘要定位已处理范围。"""
+
+    connection = get_connection()
+    try:
+        rows = connection.execute(
+            "SELECT id, role, content FROM messages WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+    finally:
+        connection.close()
+
+
+def get_message_records_after(
+    user_id: str, after_id: int, through_id: int, limit: int = 40
+) -> list[dict[str, Any]]:
+    """按 ID 正序分批取尚未总结的旧消息，不受最近 100 条候选上限影响。"""
+
+    connection = get_connection()
+    try:
+        rows = connection.execute(
+            "SELECT id, role, content FROM messages "
+            "WHERE user_id = ? AND id > ? AND id <= ? ORDER BY id ASC LIMIT ?",
+            (user_id, after_id, through_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+def get_conversation_summary(user_id: str) -> dict[str, Any]:
+    """没有摘要时返回空摘要和游标 0，不提前写入数据库。"""
+
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            "SELECT summary, last_message_id FROM conversation_summaries WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row is not None else {"summary": "", "last_message_id": 0}
+    finally:
+        connection.close()
+
+
+def save_conversation_summary(
+    user_id: str, expected_last_id: int, last_message_id: int, summary: str
+) -> bool:
+    """原子地保存摘要与游标；另一请求已更新时返回 False，不覆盖较新版本。"""
+
+    if not summary.strip() or last_message_id <= expected_last_id:
+        raise ValueError("摘要不能为空，且处理位置必须前进。")
+    connection = get_connection()
+    try:
+        # 网络请求在事务外完成；这里只有一次很短的写事务。
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT last_message_id FROM conversation_summaries WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        current_id = int(row["last_message_id"]) if row is not None else 0
+        if current_id != expected_last_id:
+            connection.rollback()
+            return False
+        # 游标必须指向本用户已完成的助手消息，避免把当前未回答的问题标成已总结。
+        last_message = connection.execute(
+            "SELECT role FROM messages WHERE user_id = ? AND id = ?",
+            (user_id, last_message_id),
+        ).fetchone()
+        if last_message is None or last_message["role"] != "assistant":
+            raise ValueError("摘要游标必须指向当前用户的助手回答。")
+        now = datetime.now().isoformat(timespec="seconds")
+        if row is None:
+            connection.execute(
+                "INSERT INTO conversation_summaries "
+                "(user_id, summary, last_message_id, updated_at) VALUES (?, ?, ?, ?)",
+                (user_id, summary.strip(), last_message_id, now),
+            )
+        else:
+            connection.execute(
+                "UPDATE conversation_summaries "
+                "SET summary = ?, last_message_id = ?, updated_at = ? WHERE user_id = ?",
+                (summary.strip(), last_message_id, now, user_id),
+            )
+        connection.commit()
+        return True
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 # 新增一个待办事项。
 def add_todo(user_id: str, content: str) -> dict[str, Any]:
