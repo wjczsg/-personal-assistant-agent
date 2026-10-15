@@ -1,5 +1,6 @@
 # 导入 asyncio，用线程执行同步的 Chroma 检索，避免阻塞异步请求。
 import asyncio
+import logging
 # 导入 json，用来读取大模型返回的 JSON 内容。
 import json
 # 导入 re，用来从用户文字中识别待办内容。
@@ -21,13 +22,23 @@ from ..storage.database import (
     save_message,
 )
 from ..tooling.tool_registry import execute_tool, get_tool_definitions
-from .tool_router import select_tool_route
+from .tool_router import (
+    FALLBACK_READ_ONLY_TOOLS,
+    ROUTE_ORDER,
+    ToolRouteDecision,
+    select_tool_route,
+    should_use_fallback_classifier,
+)
 from .history_summary import (
     SUMMARY_BATCHES_PER_REQUEST,
     refresh_summary_if_needed,
     summary_message,
 )
 from ..storage.vector_store import search_memories
+
+# 使用 Uvicorn 的应用日志通道，确保通过 PyCharm 启动服务时，
+# 轻量路由结果会和访问日志一起显示在当前终端中。
+logger = logging.getLogger("uvicorn.error")
 
 # 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
 # 这不是最终的语义判断，而是一个低成本的“是否值得检索”门控，
@@ -104,9 +115,14 @@ class PersonalAssistantAgent:
         return result
 
     # 从 Chroma 检索与当前问题相关的长期记忆。
-    async def _get_relevant_memories(self, message: str) -> list[dict[str, Any]]:
+    async def _get_relevant_memories(
+        self,
+        message: str,
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
         # 普通问候、天气、计算和待办问题通常不依赖长期个人背景，直接跳过向量检索。
-        if not should_search_memory(message):
+        # force=True 只由轻量路由判断为 memory 时使用，避免路由结果被门控规则再次挡住。
+        if not force and not should_search_memory(message):
             return []
         # Chroma 当前使用同步 API；放到线程中执行，避免阻塞 FastAPI 的异步事件循环。
         try:
@@ -120,6 +136,61 @@ class PersonalAssistantAgent:
         # 向量数据库暂时不可用时，继续进行普通对话，不让记忆功能拖垮 Agent。
         except Exception:
             return []
+
+    async def _classify_fallback_route(self, message: str) -> str | None:
+        """对规则未识别出的具体问题做一次低成本、只输出类别的判断。"""
+
+        if not settings.llm_api_key or not should_use_fallback_classifier(message):
+            return None
+
+        classifier_body: dict[str, Any] = {
+            "model": settings.llm_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是工具路由分类器。只根据用户当前问题选择一个类别，"
+                        "不要回答问题，不要调用工具。只能输出 JSON："
+                        '{"route":"weather|todo|document|memory|chat"}。'
+                        "weather 表示天气或天气影响，todo 表示查询待办，"
+                        "document 表示询问已上传资料，memory 表示询问用户个人背景，"
+                        "chat 表示其他问题。无法确定时选择 chat。"
+                    ),
+                },
+                {"role": "user", "content": message},
+            ],
+            "temperature": 0,
+            # 分类结果只有一个枚举值，32 个输出 token 已经足够。
+            "max_tokens": 32,
+            "response_format": {"type": "json_object"},
+        }
+        # DeepSeek 的思考内容对这个分类没有价值，关闭后能减少延迟和消耗。
+        if settings.llm_model.startswith("deepseek-"):
+            classifier_body["thinking"] = {"type": "disabled"}
+
+        try:
+            url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                    json=classifier_body,
+                )
+                response.raise_for_status()
+
+            content = response.json()["choices"][0]["message"].get("content")
+            parsed = json.loads(content) if isinstance(content, str) else {}
+            route = parsed.get("route") if isinstance(parsed, dict) else None
+            if route not in ROUTE_ORDER:
+                return None
+            logger.info("轻量工具路由结果：route=%s", route)
+            return route
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("轻量工具路由响应格式无效：%s", exc)
+        except Exception as exc:
+            # 分类失败不能阻断正常聊天；后续仍按 chat 路由请求主模型。
+            logger.warning("轻量工具路由调用失败：%s", exc)
+        return None
 
     # 根据用户文字做几个适合初学者的工具调用判断。
     async def _try_tools(self, message: str) -> str | None:
@@ -277,7 +348,7 @@ class PersonalAssistantAgent:
             # 指定这条消息来自系统，而不是用户。
             "role": "system",
             # 说明现有工具各自的使用场景和多工具任务的执行规则。
-            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 propose_todo，并把建议内容放入 content 参数；propose_todo 只生成待确认提案，不能说已经添加待办，用户必须在下一条消息明确确认；询问天气时调用 get_weather，把城市放入 city。问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才提出带伞待办建议。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
+            "content": "你是一个友好的中文个人助理。需要精确计算时调用 calculator；询问当前日期、时间或星期几时调用 get_current_time，参数为 {}，根据服务器本地时间回答，不能猜测或沿用历史时间；询问用户还没有完成的待办事项时调用 get_todos，参数为 {}；用户要求记住或添加待办时调用 propose_todo，并把建议内容放入 content 参数；propose_todo 只生成待确认提案，不能说已经添加待办，用户必须在下一条消息明确确认；询问天气时调用 get_weather，把城市放入 city。即使用户没有直接说“天气”，但在询问带不带伞、是否会淋雨、出门穿什么或冷不冷时，也要根据上下文判断是否需要调用 get_weather；问现在的天气可省略 date；问今天、明天、后天的预报时 date 分别用 today、tomorrow、day_after_tomorrow；用户给出具体日期时用 YYYY-MM-DD，不要猜测未提供的日期。天气工具只支持城市当地今天起未来 16 天的每日预报，不支持历史天气或指定小时。只有用户明确表达长期目标、稳定偏好或个人背景时才调用 save_memory，并将信息放入 content，将类型放入 memory_type；临时问题、天气、计算结果和普通闲聊不要保存为长期记忆。如果一个任务需要多个工具，请先调用前一个工具，读取工具返回结果后再决定是否调用下一个工具；涉及条件判断时，只有满足条件才执行后续工具。例如查询天气后，只有确认下雨才提出带伞待办建议。不要假设工具结果。时间管理等普通知识问题直接简洁回答。",
         }
         # 工具定义告诉模型有哪些合法参数；这里再补充自然语言问题与参数的对应关系。
         # 例如“我完成了什么”对应 completed，“所有待办”对应 all；普通查询保持旧的默认值。
@@ -317,6 +388,16 @@ class PersonalAssistantAgent:
             message,
             needs_memory=should_search_memory(message),
         )
+
+        # 只有规则没有选出任何工具时，才额外请求一次轻量分类器。
+        # 直接命中天气、待办或文档规则的问题不会增加第二次模型请求。
+        if not route_decision.tool_names and route_decision.routes == ("chat",):
+            fallback_route = await self._classify_fallback_route(message)
+            if fallback_route is not None:
+                route_decision = ToolRouteDecision(
+                    routes=(fallback_route,),
+                    tool_names=FALLBACK_READ_ONLY_TOOLS[fallback_route],
+                )
         selected_tool_names = route_decision.tool_names
         # 路由后再次明确本轮工具白名单，避免系统提示词中的全量工具说明造成误解。
         if selected_tool_names:
@@ -328,9 +409,15 @@ class PersonalAssistantAgent:
                 + "。"
             )
         else:
-            system_message["content"] += "本轮路由为 chat；本轮没有可用工具，请直接回答。"
+            route_label = ", ".join(route_decision.routes) or "chat"
+            system_message["content"] += (
+                f"本轮路由为 {route_label}；本轮没有可用工具，请直接回答。"
+            )
         # 从 Chroma 查询与当前问题语义相关的长期记忆。
-        relevant_memories = await self._get_relevant_memories(message)
+        relevant_memories = await self._get_relevant_memories(
+            message,
+            force="memory" in route_decision.routes,
+        )
         memory_messages: list[dict[str, Any]] = []
         # 只有检索到长期记忆时，才额外加入长期记忆上下文。
         if relevant_memories:

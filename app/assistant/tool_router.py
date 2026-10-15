@@ -22,9 +22,32 @@ ROUTE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "chat": (),
 }
 
+# 兜底分类只允许只读工具。
+# 即使轻量分类器判断错了，也不能因为一次误判就新增、修改或删除用户数据。
+FALLBACK_READ_ONLY_TOOLS: dict[str, tuple[str, ...]] = {
+    "weather": ("get_weather",),
+    "todo": ("get_todos",),
+    "document": ("search_uploaded_documents",),
+    "memory": (),
+    "chat": (),
+}
+
 # 第一版路由采用可测试的轻量词组匹配，不额外请求一次大模型。
 # 词组按照业务领域分开维护，避免所有规则堆在 Agent 主流程中。
 WEATHER_HINTS = ("天气", "气温", "温度", "下雨", "降雨", "天气预报")
+# 【本次修改 1/2】这些表达没有直接出现“天气”，但通常是在询问天气影响。
+# 例如“明天出门需要带伞吗”应该有机会使用 get_weather，而不是直接按普通聊天回答。
+WEATHER_IMPLICIT_HINTS = (
+    "带伞",
+    "带雨具",
+    "雨具",
+    "会不会淋雨",
+    "需要外套",
+    "穿什么",
+    "冷不冷",
+    "热不热",
+    "出门要不要",
+)
 TODO_HINTS = (
     "待办",
     "任务列表",
@@ -65,6 +88,35 @@ MEMORY_SAVE_HINTS = ("请记住", "帮我记住", "长期记忆", "保存这个�
 CALCULATOR_HINTS = ("计算", "算一下", "算一算", "等于多少")
 CURRENT_TIME_HINTS = ("现在几点", "当前时间", "今天几号", "今天日期", "星期几")
 
+# 这些问题通常不需要额外调用一次分类模型，直接按普通聊天处理即可。
+OBVIOUS_CHAT_HINTS = (
+    "你好",
+    "嗨",
+    "hello",
+    "hi",
+    "谢谢",
+    "晚安",
+    "早上好",
+    "你是谁",
+)
+
+# 只有出现疑问或请求表达时，才值得为“规则没有识别出来”的问题做一次兜底分类。
+QUESTION_HINTS = (
+    "吗",
+    "么",
+    "呢",
+    "如何",
+    "怎么",
+    "帮我",
+    "请问",
+    "能不能",
+    "可不可以",
+    "需要不需要",
+    "是否",
+    "？",
+    "?",
+)
+
 
 @dataclass(frozen=True)
 class ToolRouteDecision:
@@ -88,6 +140,17 @@ def _contains_arithmetic_expression(message: str) -> bool:
     )
 
 
+def should_use_fallback_classifier(message: str) -> bool:
+    """判断当前问题是否值得额外请求一次轻量路由分类器。"""
+
+    normalized_message = message.strip()
+    if len(normalized_message) < 6:
+        return False
+    if _contains_any(normalized_message, OBVIOUS_CHAT_HINTS):
+        return False
+    return _contains_any(normalized_message, QUESTION_HINTS)
+
+
 def select_tool_route(message: str, needs_memory: bool = False) -> ToolRouteDecision:
     """选择天气、待办、文档、记忆或普通聊天路由。
 
@@ -99,6 +162,10 @@ def select_tool_route(message: str, needs_memory: bool = False) -> ToolRouteDeci
     selected_routes: set[str] = set()
 
     if _contains_any(normalized_message, WEATHER_HINTS):
+        selected_routes.add("weather")
+    elif _contains_any(normalized_message, WEATHER_IMPLICIT_HINTS):
+        # 【本次修改 2/2】这是“低置信度天气候选”：不再额外调用一次大模型，
+        # 而是把安全的只读天气工具交给本轮主模型，由主模型决定是否真的调用。
         selected_routes.add("weather")
     if _contains_any(normalized_message, TODO_HINTS):
         selected_routes.add("todo")

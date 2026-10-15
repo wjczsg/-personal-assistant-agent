@@ -2,12 +2,18 @@
 
 import unittest
 
-from app.assistant.tool_router import select_tool_route
+from app.assistant.tool_router import select_tool_route, should_use_fallback_classifier
 
 
 class ToolRoutingTests(unittest.TestCase):
     def test_weather_route_only_exposes_weather_tool(self) -> None:
         decision = select_tool_route("福州明天天气怎么样？")
+        self.assertEqual(decision.routes, ("weather",))
+        self.assertEqual(decision.tool_names, ("get_weather",))
+
+    def test_implicit_weather_question_exposes_read_only_weather_tool(self) -> None:
+        # 问题没有直接出现“天气”，但“明天出门要不要带伞”明显依赖天气。
+        decision = select_tool_route("我在福州，明天出门需要带伞吗？")
         self.assertEqual(decision.routes, ("weather",))
         self.assertEqual(decision.tool_names, ("get_weather",))
 
@@ -36,6 +42,11 @@ class ToolRoutingTests(unittest.TestCase):
         decision = select_tool_route("你好，今天心情怎么样？")
         self.assertEqual(decision.routes, ("chat",))
         self.assertEqual(decision.tool_names, ())
+
+    def test_fallback_classifier_only_handles_unmatched_concrete_questions(self) -> None:
+        # 这句话没有“天气/带伞”等规则词，应该交给轻量分类器判断。
+        self.assertTrue(should_use_fallback_classifier("我在福州，明天出门需要准备什么吗？"))
+        self.assertFalse(should_use_fallback_classifier("你好，今天心情怎么样？"))
 
     def test_combined_weather_and_todo_request_keeps_both_routes(self) -> None:
         decision = select_tool_route("如果明天下雨，就提醒我带伞")

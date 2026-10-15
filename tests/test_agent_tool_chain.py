@@ -40,6 +40,46 @@ class FakeAsyncClient:
 
 
 class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unmatched_question_uses_lightweight_route_before_weather(self):
+        # 第一次响应来自轻量分类器：只判断“这是天气问题”，不回答用户问题。
+        route_response = FakeResponse({
+            "role": "assistant",
+            "content": json.dumps({"route": "weather"}),
+        })
+        weather_call = FakeResponse({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "weather-fallback-call",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": json.dumps({"city": "福州", "date": "tomorrow"}),
+                },
+            }],
+        })
+        final_answer = FakeResponse({
+            "role": "assistant",
+            "content": "福州明天的天气查询结果如下。",
+        })
+        client = FakeAsyncClient([route_response, weather_call, final_answer])
+        executed_tools = []
+
+        async def fake_execute_tool(name, arguments, user_id):
+            executed_tools.append((name, arguments, user_id))
+            return "福州明天有小雨，降水概率 70%。"
+
+        agent = PersonalAssistantAgent("test-user")
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+            answer = await agent._ask_llm("我在福州，明天出门需要准备什么吗？", [])
+
+        # 轻量分类器只负责把天气工具放进白名单，主模型才负责提取参数和组织答案。
+        self.assertEqual([item[0] for item in executed_tools], ["get_weather"])
+        self.assertEqual(executed_tools[0][1], {"city": "福州", "date": "tomorrow"})
+        self.assertIn("天气查询结果", answer)
+
     async def test_weather_result_can_trigger_todo_proposal(self):
         # 第一次模型响应：先查询明天天气。
         weather_call = {
