@@ -71,8 +71,8 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.tool_executor.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("我在福州，明天出门需要准备什么吗？", [])
 
         # 轻量分类器只负责把天气工具放进白名单，主模型才负责提取参数和组织答案。
@@ -127,8 +127,8 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.tool_executor.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("如果明天下雨，就帮我添加带伞待办", [])
 
         # 验证两个工具按照依赖顺序执行，并且最终回答来自第三轮模型响应。
@@ -178,8 +178,8 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.tool_executor.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("我完成了整理简历", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "complete_todo"])
@@ -226,8 +226,8 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.tool_executor.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("把整理简历这条待办删除", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "delete_todo"])
@@ -275,8 +275,8 @@ class AgentToolChainTests(unittest.IsolatedAsyncioTestCase):
 
         agent = PersonalAssistantAgent("test-user")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
-                patch("app.assistant.agent.execute_tool", side_effect=fake_execute_tool):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.tool_executor.execute_tool", side_effect=fake_execute_tool):
             answer = await agent._ask_llm("把整理简历改成周日完善简历", [])
 
         self.assertEqual([item[0] for item in executed_tools], ["get_todos", "update_todo"])

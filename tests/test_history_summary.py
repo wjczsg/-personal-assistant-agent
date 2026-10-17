@@ -129,7 +129,7 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
                       "completion_tokens_details": {"reasoning_tokens": 10}},
         })
         with patch("app.assistant.history_summary.settings.llm_model", "deepseek-flash"), \
-                patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+                patch("app.llm.client.httpx.AsyncClient", return_value=client):
             summary = await generate_summary("", [])
         self.assertEqual(summary, "主方向：Java。")
         self.assertEqual(client.requests[0]["reasoning_effort"], "low")
@@ -140,7 +140,7 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
         client = FakeSummaryClient({
             "choices": [{"finish_reason": "length", "message": {"content": "主方向是"}}],
         })
-        with patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+        with patch("app.llm.client.httpx.AsyncClient", return_value=client):
             with self.assertRaisesRegex(ValueError, "finish_reason='length'"):
                 await generate_summary("", [])
 
@@ -152,7 +152,7 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
         ):
             client = FakeSummaryClient({"choices": [choice]})
             with self.subTest(choice=choice), \
-                    patch("app.assistant.history_summary.httpx.AsyncClient", return_value=client):
+                    patch("app.llm.client.httpx.AsyncClient", return_value=client):
                 with self.assertRaises(ValueError):
                     await generate_summary("", [])
 
@@ -163,7 +163,7 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
         before = get_recent_message_records("alice")[-1]["id"]
         client = FakeAsyncClient()
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.history_summary.generate_summary", new_callable=AsyncMock, return_value="已讨论项目架构和进度。") as summarize:
             answer, _, _ = await PersonalAssistantAgent("alice").run("请继续讲下一步。")
 
@@ -184,7 +184,7 @@ class HistorySummaryTests(unittest.IsolatedAsyncioTestCase):
             save_message("alice", "assistant", f"旧回答 {index}" + "内容" * 100)
         client = FakeAsyncClient()
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.history_summary.logger"), \
                 patch("app.assistant.history_summary.generate_summary", new_callable=AsyncMock, side_effect=ValueError("摘要暂不可用")):
             answer, _, _ = await PersonalAssistantAgent("alice").run("继续聊天。")

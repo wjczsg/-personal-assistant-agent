@@ -55,7 +55,7 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         client = FakeAsyncClient([{"role": "assistant", "content": "你好！"}])
         agent = PersonalAssistantAgent("alice")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.agent.search_memories", return_value=[]), \
                 patch("app.tooling.tool_registry.search_document_chunks") as search:
             answer = await agent._ask_llm("你好", [])
@@ -92,7 +92,7 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         }
         agent = PersonalAssistantAgent("alice")
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
-                patch("app.assistant.agent.httpx.AsyncClient", return_value=client), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.agent.search_memories", return_value=[]), \
                 patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
             answer = await agent._ask_llm(question, [])

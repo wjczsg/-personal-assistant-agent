@@ -5,9 +5,8 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from ..config import settings
+from ..llm.client import llm_client
 from .context_budget import build_context, estimate_tokens
 from ..storage.database import (
     get_conversation_summary,
@@ -107,28 +106,21 @@ async def generate_summary(old_summary: str, records: list[dict[str, Any]]) -> s
             {"role": row["role"], "content": row["content"]} for row in records
         ],
     }
-    request_body = {
-        "model": settings.llm_model,
-        "messages": [
-            {"role": "system", "content": SUMMARY_INSTRUCTION},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "temperature": 0,
-        # 【本次修改 1/2】800 个输出 Token 对“思考 + 正文”可能偏紧；先以 2000 测试。
-        "max_tokens": SUMMARY_GENERATION_MAX_TOKENS,
-    }
+    summary_messages = [
+        {"role": "system", "content": SUMMARY_INSTRUCTION},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
     # DeepSeek 的 low 仍保留思考，但减少摘要请求的思考强度；其他模型不附加该参数。
-    if settings.llm_model.startswith("deepseek-"):
-        request_body["reasoning_effort"] = "low"
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            json=request_body,
-        )
-        response.raise_for_status()
-    result = response.json()
+    reasoning_effort = "low" if settings.llm_model.startswith("deepseek-") else None
+    # 摘要模块只负责摘要内容；公共客户端统一处理 URL、鉴权和 HTTP 通信。
+    result = await llm_client.complete(
+        messages=summary_messages,
+        temperature=0,
+        # 【本次修改 1/2】800 个输出 Token 对“思考 + 正文”可能偏紧；先以 2000 测试。
+        max_tokens=SUMMARY_GENERATION_MAX_TOKENS,
+        reasoning_effort=reasoning_effort,
+        timeout=60,
+    )
     choice = result["choices"][0]
     usage = result.get("usage") or {}
     details = usage.get("completion_tokens_details") or {}
