@@ -1,28 +1,14 @@
-# 导入 asyncio，用线程执行同步的 Chroma 检索，避免阻塞异步请求。
-import asyncio
-import logging
-# 导入 json，用来读取大模型返回的 JSON 内容。
-import json
 # 导入类型提示工具。
 from typing import Any
 # 导入配置、记忆和工具函数。
 from ..config import settings
 from ..llm.client import llm_client
 from .context_budget import ContextBudgetExceeded, build_context
-from ..storage.database import (
-    get_conversation_summary,
-    get_recent_message_records,
-    save_message,
-)
+from .conversation_service import finish_conversation_turn, start_conversation_turn
 from ..tooling.tool_registry import get_tool_definitions
-from .tool_router import (
-    FALLBACK_READ_ONLY_TOOLS,
-    ROUTE_ORDER,
-    ToolRouteDecision,
-    select_tool_route,
-    should_use_fallback_classifier,
-)
 from .prompts import build_system_prompt
+from .memory_service import search_relevant_memories
+from .routing_service import decide_tool_route
 from .tool_executor import (
     MODEL_TOOL_NAMES,
     ToolExecutionResult,
@@ -36,50 +22,6 @@ from .history_summary import (
     refresh_summary_if_needed,
     summary_message,
 )
-from ..storage.vector_store import search_memories
-
-# 使用 Uvicorn 的应用日志通道，确保通过 PyCharm 启动服务时，
-# 轻量路由结果会和访问日志一起显示在当前终端中。
-logger = logging.getLogger("uvicorn.error")
-
-# 只有问题可能涉及用户长期背景时，才尝试查询长期记忆。
-# 这不是最终的语义判断，而是一个低成本的“是否值得检索”门控，
-# 用来避免“你好”、天气和待办等问题每次都访问 Chroma。
-MEMORY_QUERY_HINTS = (
-    "长期记忆",
-    "记得我",
-    "之前说过",
-    "上次说过",
-    "我的目标",
-    "职业目标",
-    "求职方向",
-    "工作方向",
-    "发展方向",
-    "想从事",
-    "毕业后",
-    "我的计划",
-    "我的背景",
-    "我的经历",
-    "我的偏好",
-    "我喜欢",
-    "我习惯",
-    "按照我的",
-    "根据我的目标",
-)
-
-
-def should_search_memory(message: str) -> bool:
-    """判断当前问题是否值得查询长期记忆。
-
-    这里使用轻量关键词门控，而不是额外请求一次大模型：额外调用模型会增加成本和延迟，
-    也不适合作为上下文优化的第一步。后续如果规则覆盖不足，可以替换成独立分类器，
-    但不需要改变 _get_relevant_memories 的调用接口。
-    """
-    normalized_message = message.strip()
-    if not normalized_message:
-        return False
-    return any(hint in normalized_message for hint in MEMORY_QUERY_HINTS)
-
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
     # 初始化 Agent，并保存本次对话所属的用户。
@@ -101,76 +43,6 @@ class PersonalAssistantAgent:
         self.tool_calls.append({"name": name, "result": result})
         # 把结果继续交给后续回答流程。
         return result
-
-    # 从 Chroma 检索与当前问题相关的长期记忆。
-    async def _get_relevant_memories(
-        self,
-        message: str,
-        force: bool = False,
-    ) -> list[dict[str, Any]]:
-        # 普通问候、天气、计算和待办问题通常不依赖长期个人背景，直接跳过向量检索。
-        # force=True 只由轻量路由判断为 memory 时使用，避免路由结果被门控规则再次挡住。
-        if not force and not should_search_memory(message):
-            return []
-        # Chroma 当前使用同步 API；放到线程中执行，避免阻塞 FastAPI 的异步事件循环。
-        try:
-            return await asyncio.to_thread(
-                search_memories,
-                self.user_id,
-                message,
-                3,
-                settings.memory_distance_threshold,
-            )
-        # 向量数据库暂时不可用时，继续进行普通对话，不让记忆功能拖垮 Agent。
-        except Exception:
-            return []
-
-    async def _classify_fallback_route(self, message: str) -> str | None:
-        """对规则未识别出的具体问题做一次低成本、只输出类别的判断。"""
-
-        if not settings.llm_api_key or not should_use_fallback_classifier(message):
-            return None
-
-        classifier_messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": (
-                    "你是工具路由分类器。只根据用户当前问题选择一个类别，"
-                    "不要回答问题，不要调用工具。只能输出 JSON："
-                    '{"route":"weather|todo|document|memory|chat"}。'
-                    "weather 表示天气或天气影响，todo 表示查询待办，"
-                    "document 表示询问已上传资料，memory 表示询问用户个人背景，"
-                    "chat 表示其他问题。无法确定时选择 chat。"
-                ),
-            },
-            {"role": "user", "content": message},
-        ]
-        # DeepSeek 的思考内容对这个分类没有价值，关闭后能减少延迟和消耗。
-        thinking = {"type": "disabled"} if settings.llm_model.startswith("deepseek-") else None
-
-        try:
-            data = await llm_client.complete(
-                messages=classifier_messages,
-                temperature=0,
-                # 分类结果只有一个枚举值，32 个输出 token 已经足够。
-                max_tokens=32,
-                response_format={"type": "json_object"},
-                thinking=thinking,
-                timeout=20,
-            )
-            content = data["choices"][0]["message"].get("content")
-            parsed = json.loads(content) if isinstance(content, str) else {}
-            route = parsed.get("route") if isinstance(parsed, dict) else None
-            if route not in ROUTE_ORDER:
-                return None
-            logger.info("轻量工具路由结果：route=%s", route)
-            return route
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            logger.warning("轻量工具路由响应格式无效：%s", exc)
-        except Exception as exc:
-            # 分类失败不能阻断正常聊天；后续仍按 chat 路由请求主模型。
-            logger.warning("轻量工具路由调用失败：%s", exc)
-        return None
 
     # 根据用户文字做几个适合初学者的工具调用判断。
     async def _try_tools(self, message: str) -> str | None:
@@ -243,21 +115,8 @@ class PersonalAssistantAgent:
             memory_text = "；".join(item["content"] for item in memory[-4:])
             # 返回一个简单但能体现记忆的演示回答。
             return f"演示模式回答：我收到了“{message}”。最近记忆：{memory_text or '暂时没有历史记录'}"
-        # 先选择本轮业务路由；提示词模块需要根据结果写明路由和工具白名单。
-        route_decision = select_tool_route(
-            message,
-            needs_memory=should_search_memory(message),
-        )
-
-        # 只有规则没有选出任何工具时，才额外请求一次轻量分类器。
-        # 直接命中天气、待办或文档规则的问题不会增加第二次模型请求。
-        if not route_decision.tool_names and route_decision.routes == ("chat",):
-            fallback_route = await self._classify_fallback_route(message)
-            if fallback_route is not None:
-                route_decision = ToolRouteDecision(
-                    routes=(fallback_route,),
-                    tool_names=FALLBACK_READ_ONLY_TOOLS[fallback_route],
-                )
+        # 本地规则、轻量模型兜底和只读工具限制都由 routing_service 统一处理。
+        route_decision = await decide_tool_route(message)
         selected_tool_names = route_decision.tool_names
         # Agent 主流程不再维护大段提示词；具体文字规则统一由 prompts.py 组装。
         system_message = {
@@ -267,9 +126,10 @@ class PersonalAssistantAgent:
                 tool_names=selected_tool_names,
             ),
         }
-        # 从 Chroma 查询与当前问题语义相关的长期记忆。
-        relevant_memories = await self._get_relevant_memories(
-            message,
+        # 记忆门控、Chroma 查询和故障降级都由 memory_service 负责。
+        relevant_memories = await search_relevant_memories(
+            user_id=self.user_id,
+            message=message,
             force="memory" in route_decision.routes,
         )
         memory_messages: list[dict[str, Any]] = []
@@ -369,13 +229,16 @@ class PersonalAssistantAgent:
 
     # Agent 对外提供的主入口。
     async def run(self, message: str) -> tuple[str, list[dict[str, str]], int]:
-        # 查询这个用户最近的消息，作为 Agent 的记忆。
-        # 多取一些历史作为候选，再由输入预算决定本轮实际发送多少。
-        # 【摘要流程 1/6】先读旧聊天，再保存本次问题；本次未回答的问题不能当作旧问答总结。
-        records = get_recent_message_records(self.user_id, limit=100)
-        memory = [{"role": row["role"], "content": row["content"]} for row in records]
-        # 先保存用户本次输入。
-        save_message(self.user_id, "user", message)
+        # 对话服务先建立旧历史快照，再保存当前问题，避免未回答问题混入旧历史摘要。
+        turn = await start_conversation_turn(
+            user_id=self.user_id,
+            message=message,
+        )
+        memory = turn.history
+        # 摘要模块需要带 ID 的旧记录、旧历史末尾 ID 和此前摘要状态。
+        self._history_records = turn.records
+        self._history_upper_id = turn.history_upper_id
+        self._summary_state = turn.summary_state
         # 确认/取消是新一条用户消息触发的后端操作，不让模型在提案当轮替用户批准。
         decision = await handle_todo_reply(self.user_id, message)
         # 返回 None 表示这不是确认/取消消息，后面继续正常的模型对话流程。
@@ -384,23 +247,19 @@ class PersonalAssistantAgent:
             if decision.tool_name is not None:
                 self._record_tool(decision.tool_name, decision.answer)
             # 服务已经生成最终回答，这条分支不需要再调用大模型。
-            save_message(self.user_id, "assistant", decision.answer)
-            return decision.answer, self.tool_calls, len(memory)
+            await finish_conversation_turn(user_id=self.user_id, answer=decision.answer)
+            return decision.answer, self.tool_calls, turn.history_count
         # 目前所有工具都交给模型通过 Function Calling 选择。
         tool_result = await self._try_tools(message)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:
             # 保存 Agent 的回答，下一次对话就能记住它。
             answer = f"工具已经帮你处理好了：\n{tool_result}"
-            # 保存回答。
-            save_message(self.user_id, "assistant", answer)
+            # 由对话服务统一保存回答。
+            await finish_conversation_turn(user_id=self.user_id, answer=answer)
             # 返回回答、工具调用记录和记忆数量。
-            return answer, self.tool_calls, len(memory)
+            return answer, self.tool_calls, turn.history_count
         # 普通问题交给大模型处理。
-        # 【摘要流程 1/6】记住旧聊天的末尾 ID，并读取上次保存的摘要及处理进度。
-        self._history_records = records
-        self._history_upper_id = int(records[-1]["id"]) if records else 0
-        self._summary_state = get_conversation_summary(self.user_id)
         try:
             answer = await self._ask_llm(message, memory)
         except ContextBudgetExceeded as exc:
@@ -425,7 +284,7 @@ class PersonalAssistantAgent:
             if self.proposed_todos:
                 # 使用数据库工具返回的真实提案覆盖模型措辞，防止误报“已添加”。
                 answer = format_proposal_reply(self.proposed_todos)
-        # 保存模型回答。
-        save_message(self.user_id, "assistant", answer)
+        # 对话服务统一完成这一轮，把最终回答保存为 assistant 消息。
+        await finish_conversation_turn(user_id=self.user_id, answer=answer)
         # 返回回答、工具调用记录和记忆数量。
-        return answer, self.tool_calls, len(memory)
+        return answer, self.tool_calls, turn.history_count
