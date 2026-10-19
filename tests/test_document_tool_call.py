@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.assistant.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
+from app.assistant.agent_state import AgentRunState
 from app.tooling.tool_registry import execute_tool, get_tool_definitions
 
 
@@ -54,14 +55,15 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         # 模型直接回答时，Agent 不应先替它查文档。
         client = FakeAsyncClient([{"role": "assistant", "content": "你好！"}])
         agent = PersonalAssistantAgent("alice")
+        state = AgentRunState()
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
                 patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.memory_service.search_memories", return_value=[]), \
                 patch("app.tooling.tool_registry.search_document_chunks") as search:
-            answer = await agent._ask_llm("你好", [])
+            answer = await agent._ask_llm("你好", [], state)
         self.assertEqual(answer, "你好！")
         search.assert_not_called()
-        self.assertEqual(agent.tool_calls, [])
+        self.assertEqual(state.tool_calls, [])
         self.assertEqual(len(client.requests), 1)
 
     async def test_model_searches_documents_then_answers_with_source(self) -> None:
@@ -91,11 +93,12 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
             "distance": 0.2,
         }
         agent = PersonalAssistantAgent("alice")
+        state = AgentRunState()
         with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
                 patch("app.llm.client.httpx.AsyncClient", return_value=client), \
                 patch("app.assistant.memory_service.search_memories", return_value=[]), \
                 patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
-            answer = await agent._ask_llm(question, [])
+            answer = await agent._ask_llm(question, [], state)
 
         search.assert_called_once_with("alice", question, 3)
         self.assertEqual(len(client.requests), 2)
@@ -108,7 +111,7 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["chunk_index"], 2)
         self.assertIn("保留原文", result["content"])
         self.assertIn("notes.md", answer)
-        self.assertEqual(agent.tool_calls[0]["name"], "search_uploaded_documents")
+        self.assertEqual(state.tool_calls[0]["name"], "search_uploaded_documents")
 
     async def test_no_index_and_search_failure_have_different_messages(self) -> None:
         # 空结果与 Chroma 故障不能混为一谈，否则模型可能编造答案。

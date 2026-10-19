@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.assistant.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
+from app.assistant.agent_state import AgentRunState
 from app.storage.database import (
     create_todo_proposal,
     init_database,
@@ -28,8 +29,12 @@ class TodoReplyConfirmationTests(unittest.IsolatedAsyncioTestCase):
         init_database()
 
     async def test_propose_then_confirm_in_next_message(self) -> None:
-        async def fake_llm(agent, message, memory):
-            await agent._execute_model_tool("propose_todo", {"content": "复习 RAG 分块"})
+        async def fake_llm(agent, message, memory, state):
+            await agent._execute_model_tool(
+                "propose_todo",
+                {"content": "复习 RAG 分块"},
+                state=state,
+            )
             # 即使模型误称已经添加，run() 也必须使用真实提案内容覆盖它。
             return "我已经帮你添加好了。"
 
@@ -71,7 +76,7 @@ class TodoReplyConfirmationTests(unittest.IsolatedAsyncioTestCase):
         other, _, _ = await PersonalAssistantAgent("bob").run(f"确认提案 #{proposal['id']}")
         self.assertIn("找不到属于你的", other)
 
-        async def ordinary_answer(agent, message, memory):
+        async def ordinary_answer(agent, message, memory, state):
             return "你说的是：" + message
 
         with patch.object(PersonalAssistantAgent, "_ask_llm", new=ordinary_answer):
@@ -86,7 +91,11 @@ class TodoReplyConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("remember_todo", names)
 
         agent = PersonalAssistantAgent("alice")
-        result = await agent._execute_model_tool("remember_todo", {"content": "不能直接添加"})
+        result = await agent._execute_model_tool(
+            "remember_todo",
+            {"content": "不能直接添加"},
+            state=AgentRunState(),
+        )
         self.assertIn("未开放给模型", result)
         self.assertEqual(list_todos("alice", "all"), [])
 
