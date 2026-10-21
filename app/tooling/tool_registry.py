@@ -30,6 +30,9 @@ from ..storage.vector_store import search_document_chunks
 
 logger = logging.getLogger(__name__)
 
+# 限制一次文档工具回复的整体 UTF-8 大小，包含原文和出处字段。
+DOCUMENT_SEARCH_RESULT_MAX_BYTES = 2400
+
 
 # 定义工具执行函数的统一类型。
 ToolHandler = Callable[[dict[str, Any], str], str | Awaitable[str]]
@@ -365,22 +368,44 @@ async def _run_search_uploaded_documents(arguments: dict[str, Any], user_id: str
     if not hits:
         return "当前用户没有可检索的已索引文档片段，不能根据上传文档回答。"
 
-    # 原文和出处一起返回；让模型引用时能指明文件名、文档编号与片段编号。
-    # JSON 只是数据载体，文档里的文字仍是不可信资料，不是给 Agent 的指令。
-    return json.dumps(
-        {
-            "results": [
-                {
-                    "content": hit["content"],
-                    "filename": hit["filename"],
-                    "document_id": hit["document_id"],
-                    "chunk_index": hit["chunk_index"],
-                }
-                for hit in hits
-            ]
-        },
-        ensure_ascii=False,
-    )
+    # JSON 是数据载体，文档文字仍是不可信资料。按整体字节数截断，
+    # 保留已返回片段的出处，并明确告知模型结果可能不完整。
+    results: list[dict[str, Any]] = []
+    truncated = False
+
+    def encode(items: list[dict[str, Any]], partial: bool) -> str:
+        return json.dumps({"results": items, "truncated": partial}, ensure_ascii=False)
+
+    for hit in hits:
+        item = {
+            "content": hit["content"],
+            "filename": hit["filename"],
+            "document_id": hit["document_id"],
+            "chunk_index": hit["chunk_index"],
+        }
+        # false 比 true 多一个字节；按完整结果的开销判断，避免边界超限。
+        if len(encode([*results, item], False).encode("utf-8")) <= DOCUMENT_SEARCH_RESULT_MAX_BYTES:
+            results.append(item)
+            continue
+
+        # 当前片段放不下时，找能容纳的最长原文前缀，避免切断 UTF-8 字符。
+        content = str(item["content"])
+        low, high = 0, len(content)
+        while low < high:
+            middle = (low + high + 1) // 2
+            shortened = {**item, "content": content[:middle] + "…"}
+            if len(encode([*results, shortened], True).encode("utf-8")) <= DOCUMENT_SEARCH_RESULT_MAX_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            results.append({**item, "content": content[:low] + "…"})
+        truncated = True
+        break
+
+    if not results:
+        return encode([], True)
+    return encode(results, truncated)
 
 
 # 工具名称到执行函数的映射表。

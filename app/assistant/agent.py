@@ -172,6 +172,8 @@ class PersonalAssistantAgent:
         )
         selected_tool_names = context_state.allowed_tool_names
         tool_messages: list[dict[str, Any]] = []
+        # 同一条用户消息最多实际检索一次文档，跨工具轮次也生效。
+        document_search_executed = False
         # 一轮聊天中的多次模型请求使用同一编号，便于从终端还原工具调用顺序。
         run_id = uuid4().hex[:8]
         # 限制工具调用轮数，既支持多工具连续调用，也防止模型异常时无限循环。
@@ -232,12 +234,27 @@ class PersonalAssistantAgent:
             tool_messages.append(assistant_message)
             # 逐个处理模型提出的工具调用。
             for tool_call in tool_calls:
-                # 原始 JSON 参数解析、权限校验和注册表调用统一交给工具执行器。
-                execution = await execute_tool_call(
-                    tool_call=tool_call,
-                    user_id=self.user_id,
-                    allowed_tool_names=selected_tool_names,
-                )
+                function = tool_call.get("function")
+                tool_name = function.get("name") if isinstance(function, dict) else None
+                tool_call_id = tool_call.get("id")
+                if (tool_name == "search_uploaded_documents"
+                        and document_search_executed
+                        and isinstance(tool_call_id, str)):
+                    # 模型一次发出多个调用时，每个 id 仍须有对应的 tool 回复。
+                    execution = ToolExecutionResult(
+                        name=tool_name,
+                        content="本轮已检索上传文档，请使用前一次检索结果回答；依据不足时请说明。",
+                        tool_call_id=tool_call_id,
+                    )
+                else:
+                    # 参数解析、权限校验和注册表调用统一交给工具执行器。
+                    execution = await execute_tool_call(
+                        tool_call=tool_call,
+                        user_id=self.user_id,
+                        allowed_tool_names=selected_tool_names,
+                    )
+                    if execution.name == "search_uploaded_documents" and execution.executed:
+                        document_search_executed = True
                 # Agent 只接收结构化结果并维护本轮状态，不再了解工具执行细节。
                 self._apply_tool_execution(state, execution)
                 tool_messages.append(execution.to_tool_message())

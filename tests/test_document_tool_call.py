@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 from app.assistant.agent import MODEL_TOOL_NAMES, PersonalAssistantAgent
 from app.assistant.agent_state import AgentRunState
-from app.tooling.tool_registry import execute_tool, get_tool_definitions
+from app.tooling.tool_registry import (
+    DOCUMENT_SEARCH_RESULT_MAX_BYTES,
+    execute_tool,
+    get_tool_definitions,
+)
 
 
 class FakeResponse:
@@ -127,6 +131,84 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
                 "search_uploaded_documents", {"query": "我的文档"}, "alice"
             )
         self.assertIn("检索暂时失败", failed)
+
+    async def test_duplicate_searches_in_one_model_response_run_once(self) -> None:
+        question = "上传的文档讲了什么？"
+        tool_calls = [
+            {
+                "id": f"search-{index}",
+                "type": "function",
+                "function": {
+                    "name": "search_uploaded_documents",
+                    "arguments": json.dumps({"query": question}, ensure_ascii=False),
+                },
+            }
+            for index in (1, 2)
+        ]
+        client = FakeAsyncClient([
+            {"role": "assistant", "content": None, "tool_calls": tool_calls},
+            {"role": "assistant", "content": "文档介绍了索引。"},
+        ])
+        hit = {"content": "文档介绍了索引。", "filename": "notes.txt",
+               "document_id": 1, "chunk_index": 0}
+        agent = PersonalAssistantAgent("alice")
+        state = AgentRunState()
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.memory_service.search_memories", return_value=[]), \
+                patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
+            answer = await agent._ask_llm(question, [], state)
+
+        self.assertEqual(answer, "文档介绍了索引。")
+        search.assert_called_once_with("alice", question, 3)
+        self.assertEqual(len(state.tool_calls), 1)
+        replies = [item for item in client.requests[1]["messages"] if item["role"] == "tool"]
+        self.assertEqual([item["tool_call_id"] for item in replies], ["search-1", "search-2"])
+        self.assertEqual(json.loads(replies[0]["content"])["results"][0]["filename"], "notes.txt")
+        self.assertIn("本轮已检索", replies[1]["content"])
+
+    async def test_search_limit_applies_across_model_rounds(self) -> None:
+        question = "上传的文档讲了什么？"
+        requests = [
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": f"search-{index}", "type": "function",
+                "function": {"name": "search_uploaded_documents",
+                             "arguments": json.dumps({"query": question}, ensure_ascii=False)},
+            }]}
+            for index in (1, 2)
+        ]
+        client = FakeAsyncClient([*requests, {"role": "assistant", "content": "索引。"}])
+        agent = PersonalAssistantAgent("alice")
+        state = AgentRunState()
+        hit = {"content": "索引。", "filename": "notes.txt",
+               "document_id": 1, "chunk_index": 0}
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.memory_service.search_memories", return_value=[]), \
+                patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
+            answer = await agent._ask_llm(question, [], state)
+
+        self.assertEqual(answer, "索引。")
+        search.assert_called_once()
+        self.assertEqual(len(state.tool_calls), 1)
+        replies = [item for item in client.requests[2]["messages"] if item["role"] == "tool"]
+        self.assertEqual(len(replies), 2)
+        self.assertIn("本轮已检索", replies[1]["content"])
+
+    async def test_document_result_caps_total_bytes_and_keeps_source(self) -> None:
+        hit = {"content": "中文内容" * 200, "filename": "notes.txt",
+               "document_id": 1, "chunk_index": 2}
+        with patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit] * 3):
+            result = await execute_tool(
+                "search_uploaded_documents", {"query": "总结文档"}, "alice"
+            )
+
+        self.assertLessEqual(len(result.encode("utf-8")), DOCUMENT_SEARCH_RESULT_MAX_BYTES)
+        payload = json.loads(result)
+        self.assertTrue(payload["truncated"])
+        self.assertGreater(len(payload["results"]), 0)
+        self.assertEqual(payload["results"][0]["filename"], "notes.txt")
+        self.assertEqual(payload["results"][0]["chunk_index"], 2)
 
 
 if __name__ == "__main__":
