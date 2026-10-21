@@ -17,6 +17,9 @@ env/
 *.sqlite3
 chroma_data/
 
+# 评测运行结果（每次跑都会变，不入库）
+evals/results/
+
 # IDE 配置
 .idea/
 .vscode/

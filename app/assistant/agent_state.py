@@ -22,3 +22,5 @@ class AgentRunState:
     history_upper_id: int = 0
     # 本轮开始时读取的滚动摘要及游标；直接测试私有方法时可以没有该状态。
     summary_state: dict[str, Any] | None = None
+    # 本轮若再次追问并保存新状态，结束时不能清掉这条新的待补充任务。
+    clarification_saved: bool = False

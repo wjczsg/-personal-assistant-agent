@@ -42,6 +42,15 @@ def init_database() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        # 一名用户同一时刻只保留一项等待补充的任务；原请求跨聊天轮次保存在 SQLite。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS pending_clarifications (
+                user_id TEXT PRIMARY KEY,
+                original_message TEXT NOT NULL,
+                question TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
         # 创建待办事项表，给 Agent 的记事工具使用。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS todos (
@@ -152,6 +161,49 @@ def save_message(user_id: str, role: str, content: str) -> None:
         )
     # 关闭数据库连接。
     connection.close()
+
+
+def save_pending_clarification(user_id: str, original_message: str, question: str) -> None:
+    """保存当前用户等待补充的任务；新追问会替换旧追问。"""
+
+    connection = get_connection()
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO pending_clarifications (user_id, original_message, question, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "original_message=excluded.original_message, question=excluded.question, "
+                "created_at=excluded.created_at",
+                (user_id, original_message, question, datetime.now().isoformat(timespec="seconds")),
+            )
+    finally:
+        connection.close()
+
+
+def get_pending_clarification(user_id: str) -> dict[str, str] | None:
+    """只读取当前用户的待补充任务。"""
+
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            "SELECT original_message, question, created_at "
+            "FROM pending_clarifications WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        connection.close()
+
+
+def clear_pending_clarification(user_id: str) -> None:
+    """当前任务完成、取消或被新任务替换时清除等待状态。"""
+
+    connection = get_connection()
+    try:
+        with connection:
+            connection.execute("DELETE FROM pending_clarifications WHERE user_id = ?", (user_id,))
+    finally:
+        connection.close()
 
 # 读取某个用户最近的对话。
 def get_recent_messages(user_id: str, limit: int = 10) -> list[dict[str, Any]]:

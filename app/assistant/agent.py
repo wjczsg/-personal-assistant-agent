@@ -1,9 +1,17 @@
 # 导入类型提示工具。
+import logging
 from typing import Any
+from uuid import uuid4
 # 导入配置、记忆和工具函数。
 from ..config import settings
 from ..llm.client import llm_client
 from .agent_state import AgentRunState
+from .clarification_service import (
+    clarification_question,
+    finish_pending_clarification,
+    remember_clarification,
+    resolve_pending_clarification,
+)
 from .context_budget import ContextBudgetExceeded
 from .context_service import build_model_context, prepare_agent_context
 from .conversation_service import finish_conversation_turn, start_conversation_turn
@@ -16,6 +24,8 @@ from .tool_executor import (
 )
 # 待办确认/取消的识别和数据库操作已经独立到服务模块；Agent 只负责调用。
 from .todo_proposal_service import format_proposal_reply, handle_todo_reply
+
+logger = logging.getLogger("uvicorn.error")
 # 这个类就是项目里的“个人助理 Agent”。
 class PersonalAssistantAgent:
     # 初始化 Agent，并保存本次对话所属的用户。
@@ -162,15 +172,26 @@ class PersonalAssistantAgent:
         )
         selected_tool_names = context_state.allowed_tool_names
         tool_messages: list[dict[str, Any]] = []
+        # 一轮聊天中的多次模型请求使用同一编号，便于从终端还原工具调用顺序。
+        run_id = uuid4().hex[:8]
         # 限制工具调用轮数，既支持多工具连续调用，也防止模型异常时无限循环。
         max_tool_rounds = 3
         # 按轮次请求模型，直到模型返回最终文字。
-        for _ in range(max_tool_rounds):
+        for round_no in range(1, max_tool_rounds + 1):
             # 工具结果会逐轮增加，因此每次请求模型前都让上下文服务重新算预算。
-            budget_result = await build_model_context(
-                state=context_state,
-                tool_messages=tool_messages,
-            )
+            try:
+                budget_result = await build_model_context(
+                    state=context_state,
+                    tool_messages=tool_messages,
+                )
+            except ContextBudgetExceeded:
+                results = [item for item in tool_messages if item.get("role") == "tool"]
+                logger.warning(
+                    "Agent 上下文超预算：run=%s round=%d budget=%d tool_results=%d result_chars=%d",
+                    run_id, round_no, context_state.input_limit, len(results),
+                    sum(len(item.get("content") or "") for item in results),
+                )
+                raise
             # Agent 只描述本轮需要什么；URL、鉴权和 HTTP 请求统一交给 llm_client。
             data = await llm_client.complete(
                 messages=budget_result.messages,
@@ -183,10 +204,30 @@ class PersonalAssistantAgent:
             assistant_message = data["choices"][0]["message"]
             # 读取模型是否提出了工具调用请求。
             tool_calls = assistant_message.get("tool_calls") or []
+            if tool_calls:
+                tool_names = []
+                for item in tool_calls:
+                    function = item.get("function")
+                    tool_names.append(
+                        function.get("name", "<unknown>")
+                        if isinstance(function, dict) else "<unknown>"
+                    )
+                logger.info(
+                    "Agent 工具请求：run=%s round=%d tools=%s",
+                    run_id, round_no, tool_names,
+                )
             # 如果没有工具调用，说明模型已经生成最终答案。
             if not tool_calls:
                 # 返回模型生成的自然语言；content 为空时给出兜底文字。
-                return assistant_message.get("content") or "我暂时没有生成有效回答。"
+                answer = assistant_message.get("content") or "我暂时没有生成有效回答。"
+                question = clarification_question(answer)
+                if question is not None:
+                    # 有待补充的业务任务才跨轮保存；普通闲聊的追问仍走对话历史。
+                    if (route_decision.tool_names or route_decision.routes != ("chat",)) and not state.proposed_todos:
+                        await remember_clarification(self.user_id, message, question)
+                        state.clarification_saved = True
+                    return question
+                return answer
             # 把模型的工具调用消息放回上下文，下一轮模型才能知道自己刚才请求了什么。
             tool_messages.append(assistant_message)
             # 逐个处理模型提出的工具调用。
@@ -200,6 +241,10 @@ class PersonalAssistantAgent:
                 # Agent 只接收结构化结果并维护本轮状态，不再了解工具执行细节。
                 self._apply_tool_execution(state, execution)
                 tool_messages.append(execution.to_tool_message())
+                logger.info(
+                    "Agent 工具结果：run=%s round=%d tool=%s executed=%s result_chars=%d",
+                    run_id, round_no, execution.name, execution.executed, len(execution.content),
+                )
         # 达到最大调用轮数仍未得到最终答案时，返回明确提示。
         return "工具调用次数超过限制，请稍后再试。"
 
@@ -224,6 +269,12 @@ class PersonalAssistantAgent:
             history_upper_id=turn.history_upper_id,
             summary_state=dict(turn.summary_state),
         )
+        # 在普通路由之前恢复上轮等待补充的任务；新任务或取消会清除旧状态。
+        pending_resolution = await resolve_pending_clarification(self.user_id, message)
+        if pending_resolution.direct_answer is not None:
+            await finish_conversation_turn(user_id=self.user_id, answer=pending_resolution.direct_answer)
+            return pending_resolution.direct_answer, state.tool_calls, turn.history_count
+        effective_message = pending_resolution.message
         # 确认/取消是新一条用户消息触发的后端操作，不让模型在提案当轮替用户批准。
         decision = await handle_todo_reply(self.user_id, message)
         # 返回 None 表示这不是确认/取消消息，后面继续正常的模型对话流程。
@@ -235,7 +286,7 @@ class PersonalAssistantAgent:
             await finish_conversation_turn(user_id=self.user_id, answer=decision.answer)
             return decision.answer, state.tool_calls, turn.history_count
         # 目前所有工具都交给模型通过 Function Calling 选择。
-        tool_result = await self._try_tools(message, state)
+        tool_result = await self._try_tools(effective_message, state)
         # 如果调用了工具，就直接把工具结果组织成回答。
         if tool_result is not None:
             # 保存 Agent 的回答，下一次对话就能记住它。
@@ -246,7 +297,7 @@ class PersonalAssistantAgent:
             return answer, state.tool_calls, turn.history_count
         # 普通问题交给大模型处理。
         try:
-            answer = await self._ask_llm(message, memory, state)
+            answer = await self._ask_llm(effective_message, memory, state)
         except ContextBudgetExceeded as exc:
             # 必需内容本身超限时给出可操作提示，不继续发送注定超限的请求。
             if state.proposed_todos:
@@ -269,6 +320,9 @@ class PersonalAssistantAgent:
             if state.proposed_todos:
                 # 使用数据库工具返回的真实提案覆盖模型措辞，防止误报“已添加”。
                 answer = format_proposal_reply(state.proposed_todos)
+        if pending_resolution.resumed and not state.clarification_saved:
+            # 原任务已完成；如果模型再次追问，新状态已经由 _ask_llm 更新，不清除。
+            await finish_pending_clarification(self.user_id)
         # 对话服务统一完成这一轮，把最终回答保存为 assistant 消息。
         await finish_conversation_turn(user_id=self.user_id, answer=answer)
         # 返回回答、工具调用记录和记忆数量。
