@@ -40,17 +40,18 @@ class DocumentUploadTests(unittest.TestCase):
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
-    def test_home_keeps_upload_without_chunk_preview(self) -> None:
-        # 页面仍有上传表单，但不再出现“查看分块”的按钮和区域。
+    def test_home_has_chat_attachment_without_separate_upload_form(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn('id="uploadForm"', response.text)
+        self.assertIn('id="attachmentButton"', response.text)
+        self.assertIn('id="documentFile"', response.text)
+        self.assertNotIn('id="uploadForm"', response.text)
         self.assertNotIn('id="previewChunksButton"', response.text)
         self.assertNotIn('id="chunkPreview"', response.text)
         self.assertNotIn('id="documentSearchForm"', response.text)
         self.assertNotIn('id="documentSearchResults"', response.text)
-        self.assertIn('/static/app.js?v=document-auto-index-1', response.text)
-        self.assertIn('/static/style.css?v=document-search-removed-1', response.text)
+        self.assertIn('/static/app.js?v=chat-attachment-1', response.text)
+        self.assertIn('/static/style.css?v=chat-attachment-1', response.text)
         # OpenAPI 接口列表里也不再提供专门的分块预览接口。
         paths = self.client.get("/openapi.json").json()["paths"]
         self.assertNotIn("/api/documents/{document_id}/chunks", paths)

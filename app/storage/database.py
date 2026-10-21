@@ -114,6 +114,16 @@ def init_database() -> None:
                 created_at TEXT NOT NULL
             )
         """)
+        # 附件与用户消息明确绑定；已有消息和文档不受此表新增影响。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS message_attachments (
+                message_id INTEGER NOT NULL,
+                document_id INTEGER NOT NULL,
+                PRIMARY KEY (message_id, document_id),
+                FOREIGN KEY (message_id) REFERENCES messages(id),
+                FOREIGN KEY (document_id) REFERENCES documents(id)
+            )
+        """)
     # 关闭数据库连接。
     connection.close()
 
@@ -148,19 +158,61 @@ def get_document(user_id: str, document_id: int) -> dict[str, Any] | None:
         connection.close()
 
 # 保存一条对话消息。
-def save_message(user_id: str, role: str, content: str) -> None:
+def save_message(
+    user_id: str, role: str, content: str, document_ids: tuple[int, ...] = ()
+) -> int:
     # 打开数据库连接。
     connection = get_connection()
     # 获取当前时间，并转换成文字保存。
     created_at = datetime.now().isoformat(timespec="seconds")
-    # 执行插入语句。
-    with connection:
-        connection.execute(
-            "INSERT INTO messages (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, role, content, created_at),
-        )
-    # 关闭数据库连接。
-    connection.close()
+    try:
+        with connection:
+            if document_ids:
+                if role != "user":
+                    raise ValueError("只有用户消息可以携带文档")
+                rows = connection.execute(
+                    f"SELECT id FROM documents WHERE user_id = ? AND id IN ({','.join('?' for _ in document_ids)})",
+                    (user_id, *document_ids),
+                ).fetchall()
+                if {row["id"] for row in rows} != set(document_ids):
+                    raise ValueError("附件文档不存在或不属于当前用户")
+            cursor = connection.execute(
+                "INSERT INTO messages (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, role, content, created_at),
+            )
+            message_id = int(cursor.lastrowid)
+            for document_id in document_ids:
+                connection.execute(
+                    "INSERT INTO message_attachments (message_id, document_id) VALUES (?, ?)",
+                    (message_id, document_id),
+                )
+        return message_id
+    finally:
+        connection.close()
+
+
+def get_latest_message_attachment_ids(user_id: str) -> tuple[int, ...]:
+    """读取该用户最近一条带附件的消息，供“这份文档”式追问使用。"""
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            "SELECT ma.message_id FROM message_attachments ma "
+            "JOIN messages m ON m.id = ma.message_id "
+            "WHERE m.user_id = ? AND m.role = 'user' "
+            "ORDER BY ma.message_id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return ()
+        ids = connection.execute(
+            "SELECT ma.document_id FROM message_attachments ma "
+            "JOIN documents d ON d.id = ma.document_id "
+            "WHERE ma.message_id = ? AND d.user_id = ? ORDER BY ma.document_id",
+            (row["message_id"], user_id),
+        ).fetchall()
+        return tuple(int(item["document_id"]) for item in ids)
+    finally:
+        connection.close()
 
 
 def save_pending_clarification(user_id: str, original_message: str, question: str) -> None:

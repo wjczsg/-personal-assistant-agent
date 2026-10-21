@@ -8,6 +8,13 @@ class ChatRequest(BaseModel):
     # message 是用户本次发送给 Agent 的话。
     message: str = Field(min_length=1, description="用户消息")
 
+
+class ChatAttachment(BaseModel):
+    document_id: int
+    filename: str
+    indexed: bool
+    chunk_count: int | None = None
+
 # 定义工具调用记录，方便前端知道 Agent 用过哪些工具。
 class ToolCall(BaseModel):
     # 工具名称。
@@ -23,6 +30,8 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCall] = []
     # Agent 看到的历史消息数量。
     memory_count: int
+    # 带附件聊天时返回本条消息实际绑定的文档；纯文字聊天为空。
+    attachments: list[ChatAttachment] = []
 
 
 # 创建“添加待办的建议”时，用户和建议内容都必须由请求提供。

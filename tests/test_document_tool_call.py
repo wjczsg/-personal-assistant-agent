@@ -210,6 +210,39 @@ class DocumentToolCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["results"][0]["filename"], "notes.txt")
         self.assertEqual(payload["results"][0]["chunk_index"], 2)
 
+    async def test_attached_document_limits_search_scope(self) -> None:
+        question = "请总结一下附件"
+        client = FakeAsyncClient([
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "attached-search", "type": "function",
+                "function": {"name": "search_uploaded_documents",
+                             "arguments": json.dumps({"query": question}, ensure_ascii=False)},
+            }]},
+            {"role": "assistant", "content": "文档介绍了计划。"},
+        ])
+        state = AgentRunState(
+            document_ids=(7,),
+            summary_state={"summary": "旧文档的项目代号是蓝鲸", "last_message_id": 0},
+        )
+        agent = PersonalAssistantAgent("alice")
+        hit = {"content": "计划", "filename": "plan.txt",
+               "document_id": 7, "chunk_index": 1}
+        with patch("app.assistant.agent.settings.llm_api_key", "test-key"), \
+                patch("app.llm.client.httpx.AsyncClient", return_value=client), \
+                patch("app.assistant.memory_service.search_memories", return_value=[]), \
+                patch("app.tooling.tool_registry.search_document_chunks", return_value=[hit]) as search:
+            answer = await agent._ask_llm(
+                question,
+                [{"role": "user", "content": "甲文档的代号是什么"},
+                 {"role": "assistant", "content": "蓝鲸"}],
+                state,
+            )
+        self.assertEqual(answer, "文档介绍了计划。")
+        search.assert_called_once_with("alice", question, 3, (7,))
+        self.assertEqual(len(client.requests), 2)
+        for request in client.requests:
+            self.assertNotIn("蓝鲸", json.dumps(request["messages"], ensure_ascii=False))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 """项目的 Chroma 向量存储封装模块。"""
 
 # 从 pathlib 导入 Path，用来拼接跨平台的文件夹路径。
+import os
 from pathlib import Path
 # 从 typing 导入 Any，用来表示检索结果中可能包含多种类型的数据。
 from typing import Any
@@ -16,7 +17,7 @@ from .database import get_active_memory_ids
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 # 指定 Chroma 本地数据的保存位置。
 # 这里的向量数据不会保存到代码文件中，而是保存到这个文件夹里。
-CHROMA_PATH = PROJECT_DIR / "chroma_data"
+CHROMA_PATH = Path(os.environ.get("CHROMA_DATA_DIR", str(PROJECT_DIR / "chroma_data")))
 
 # 创建一个持久化 Chroma 客户端。
 # PersistentClient 表示数据会写入磁盘，程序重启后仍然存在。
@@ -86,6 +87,7 @@ def search_document_chunks(
     user_id: str,
     query: str,
     limit: int = 3,
+    document_ids: tuple[int, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """在当前用户已索引的文档片段中，按问题的语义寻找相关原文。"""
     # 没有任何文档片段时直接返回空列表，避免对空集合发起向量查询。
@@ -95,10 +97,19 @@ def search_document_chunks(
 
     # query_texts 会由 Chroma 转为向量；where 保证只返回当前用户的片段。
     # n_results 不能超过集合中的总记录数，但实际命中数可能更少。
+    where: dict[str, Any] = {"user_id": user_id}
+    if document_ids is not None:
+        if not document_ids:
+            return []
+        document_filter: dict[str, Any] = (
+            {"document_id": document_ids[0]}
+            if len(document_ids) == 1 else {"document_id": {"$in": list(document_ids)}}
+        )
+        where = {"$and": [{"user_id": user_id}, document_filter]}
     result = _document_collection.query(
         query_texts=[query],
         n_results=min(limit, total),
-        where={"user_id": user_id},
+        where=where,
         include=["documents", "metadatas", "distances"],
     )
 

@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 # 导入我们自己定义的 Agent、数据库初始化函数和数据模型。
 from .assistant.agent import PersonalAssistantAgent
+from .assistant.conversation_service import start_conversation_turn, finish_conversation_turn
 from .storage.database import (
     apply_todo_proposal,
     cancel_todo_proposal,
@@ -19,6 +20,7 @@ from .documents.document_indexing import DocumentNotFoundError, index_uploaded_d
 from .api.schemas import (
     ChatRequest,
     ChatResponse,
+    ChatAttachment,
     DocumentIndexRequest,
     DocumentIndexResponse,
     DocumentSearchRequest,
@@ -235,4 +237,57 @@ async def chat(request: ChatRequest) -> ChatResponse:
         answer=answer,
         tool_calls=[ToolCall(**item) for item in tool_calls],
         memory_count=memory_count,
+    )
+
+
+@app.post(
+    "/api/chat/with-attachment", response_model=ChatResponse,
+    summary="发送消息及一份文档附件",
+)
+async def chat_with_attachment(
+    user_id: str = Form(...),
+    message: str = Form(...),
+    file: UploadFile = File(...),
+) -> ChatResponse:
+    """一次请求发送文字和文档，并把文档绑定到该条用户消息。"""
+
+    clean_user_id = user_id.strip()
+    clean_message = message.strip()
+    if not clean_user_id or not clean_message:
+        raise HTTPException(status_code=400, detail="用户 ID 和消息都不能为空")
+    upload = await upload_document(file=file, user_id=clean_user_id)
+    attachment = ChatAttachment(
+        document_id=upload.document_id,
+        filename=upload.filename,
+        indexed=upload.indexed,
+        chunk_count=upload.chunk_count,
+    )
+    if not upload.indexed:
+        # 原文已经保存；即使索引失败，消息与附件关系也应留在 SQLite。
+        turn = await start_conversation_turn(
+            user_id=clean_user_id, message=clean_message,
+            document_ids=(upload.document_id,),
+        )
+        answer = (
+            f"附件「{upload.filename}」已保存，但建立索引失败，"
+            f"暂时不能依据它回答。文档编号 #{upload.document_id}，可重试索引。"
+        )
+        await finish_conversation_turn(user_id=clean_user_id, answer=answer)
+        return ChatResponse(
+            answer=answer, tool_calls=[], memory_count=turn.history_count,
+            attachments=[attachment],
+        )
+
+    agent = PersonalAssistantAgent(user_id=clean_user_id)
+    try:
+        answer, tool_calls, memory_count = await agent.run(
+            clean_message, document_ids=(upload.document_id,)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Agent 执行失败：{exc}") from exc
+    return ChatResponse(
+        answer=answer,
+        tool_calls=[ToolCall(**item) for item in tool_calls],
+        memory_count=memory_count,
+        attachments=[attachment],
     )

@@ -24,3 +24,5 @@ class AgentRunState:
     summary_state: dict[str, Any] | None = None
     # 本轮若再次追问并保存新状态，结束时不能清掉这条新的待补充任务。
     clarification_saved: bool = False
+    # 本轮只能检索这些由后端绑定的文档；None 表示沿用旧的用户文档范围。
+    document_ids: tuple[int, ...] | None = None

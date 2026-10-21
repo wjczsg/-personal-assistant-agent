@@ -3,46 +3,52 @@ const chatForm = document.querySelector("#chatForm");
 const messageInput = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
 const clearButton = document.querySelector("#clearButton");
-const uploadForm = document.querySelector("#uploadForm");
 const documentFile = document.querySelector("#documentFile");
-const uploadButton = document.querySelector("#uploadButton");
-const uploadStatus = document.querySelector("#uploadStatus");
+const attachmentButton = document.querySelector("#attachmentButton");
+const attachmentPreview = document.querySelector("#attachmentPreview");
+const attachmentStatus = document.querySelector("#attachmentStatus");
 const userId = localStorage.getItem("assistant-user-id") || "web-user";
 
-uploadForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+attachmentButton.addEventListener("click", () => documentFile.click());
+
+function validAttachment(file) {
+  return /\.(txt|md)$/i.test(file.name) && file.size <= 1024 * 1024;
+}
+
+function renderAttachmentPreview() {
+  attachmentPreview.replaceChildren();
   const file = documentFile.files[0];
   if (!file) {
-    uploadStatus.textContent = "请先选择 .txt 或 .md 文件。";
+    attachmentPreview.hidden = true;
     return;
   }
-  // 浏览器先给即时反馈；后端会再做一次校验，不能只信浏览器。
-  if (!/\.(txt|md)$/i.test(file.name) || file.size > 1024 * 1024) {
-    uploadStatus.textContent = "请选择不超过 1 MB 的 .txt 或 .md 文件。";
-    return;
-  }
-  const formData = new FormData();
-  formData.append("user_id", userId);
-  formData.append("file", file);
-  uploadButton.disabled = true;
-  uploadStatus.textContent = "正在保存文档并建立索引，请稍候……";
-  try {
-    const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.detail || "上传失败");
-    // 原文保存和向量索引分别报告；失败时保留编号，方便到 /docs 重试。
-    uploadStatus.textContent = result.indexed
-      ? `已保存并建立索引：「${result.filename}」（${result.char_count} 字，编号 #${result.document_id}，${result.chunk_count} 块）；现在可以提问。`
-      : `已保存「${result.filename}」（编号 #${result.document_id}），但自动索引失败；可在 /docs 按编号重试。`;
+  if (!validAttachment(file)) {
     documentFile.value = "";
-  } catch (error) {
-    uploadStatus.textContent = `保存失败：${error.message}`;
-  } finally {
-    uploadButton.disabled = false;
+    attachmentPreview.hidden = true;
+    attachmentStatus.textContent = "请选择不超过 1 MB 的 .txt 或 .md 文件。";
+    return;
   }
-});
+  attachmentStatus.textContent = "附件会与这条消息一起发送。";
+  const chip = document.createElement("span");
+  chip.className = "attachment-chip";
+  chip.textContent = `📄 ${file.name}`;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "attachment-remove";
+  remove.setAttribute("aria-label", "移除附件");
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    documentFile.value = "";
+    renderAttachmentPreview();
+  });
+  chip.appendChild(remove);
+  attachmentPreview.appendChild(chip);
+  attachmentPreview.hidden = false;
+}
 
-function addMessage(role, text, toolCalls = [], memoryCount = null) {
+documentFile.addEventListener("change", renderAttachmentPreview);
+
+function addMessage(role, text, toolCalls = [], memoryCount = null, attachments = []) {
   const wrapper = document.createElement("article");
   wrapper.className = `message ${role}`;
   const avatar = document.createElement("div");
@@ -53,6 +59,14 @@ function addMessage(role, text, toolCalls = [], memoryCount = null) {
   bubble.className = "bubble";
   bubble.textContent = text;
   content.appendChild(bubble);
+  if (role === "user") {
+    attachments.forEach((attachment) => {
+      const badge = document.createElement("div");
+      badge.className = "message-attachment";
+      badge.textContent = `📄 ${attachment.filename} · #${attachment.document_id}${attachment.indexed ? "" : " · 索引失败"}`;
+      content.appendChild(badge);
+    });
+  }
 
   if (role === "assistant" && toolCalls.length) {
     const toolList = document.createElement("div");
@@ -86,29 +100,50 @@ function addTyping() {
   return node;
 }
 
-async function sendMessage(message) {
-  const text = message.trim();
+async function sendMessage(message, includeAttachment = true) {
+  const file = includeAttachment ? documentFile.files[0] : null;
+  const text = message.trim() || (file ? "请介绍这份文档" : "");
   if (!text || sendButton.disabled) return;
-  addMessage("user", text);
-  messageInput.value = "";
-  messageInput.style.height = "auto";
+  if (file && !validAttachment(file)) {
+    attachmentStatus.textContent = "请选择不超过 1 MB 的 .txt 或 .md 文件。";
+    return;
+  }
   sendButton.disabled = true;
+  attachmentButton.disabled = true;
   const typing = addTyping();
 
   try {
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, message: text }),
-    });
+    let response;
+    if (file) {
+      const formData = new FormData();
+      formData.append("user_id", userId);
+      formData.append("message", text);
+      formData.append("file", file);
+      response = await fetch("/api/chat/with-attachment", { method: "POST", body: formData });
+    } else {
+      response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, message: text }),
+      });
+    }
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "请求没有成功");
+    addMessage("user", text, [], null, data.attachments || []);
     addMessage("assistant", data.answer, data.tool_calls || [], data.memory_count);
+    messageInput.value = "";
+    messageInput.style.height = "auto";
+    if (file) {
+      documentFile.value = "";
+      renderAttachmentPreview();
+    }
+    attachmentStatus.textContent = "Enter 发送 · Shift + Enter 换行 · 附件支持 UTF-8 .txt / .md，最大 1 MB";
   } catch (error) {
     addMessage("assistant", `哎呀，连接出了点小问题：${error.message}`);
   } finally {
     typing.remove();
     sendButton.disabled = false;
+    attachmentButton.disabled = false;
     messageInput.focus();
   }
 }
@@ -131,7 +166,7 @@ messageInput.addEventListener("input", () => {
 });
 
 document.querySelectorAll("[data-message]").forEach((button) => {
-  button.addEventListener("click", () => sendMessage(button.dataset.message));
+  button.addEventListener("click", () => sendMessage(button.dataset.message, false));
 });
 
 clearButton.addEventListener("click", () => {

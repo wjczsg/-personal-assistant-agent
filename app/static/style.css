@@ -82,23 +82,14 @@ button { cursor: pointer; }
 }
 .quick-actions button:hover { border-color: var(--pink); background: var(--pink-light); transform: translateY(-2px); }
 
-.upload-form {
-  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-  background: #fffaf3; border: 1px dashed #e5d5c8; border-radius: 14px;
-  color: var(--brown); font-size: 12px;
-}
-.upload-form label { white-space: nowrap; font-weight: 700; }
-.upload-form input { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
-.upload-form input::file-selector-button {
-  margin-right: 8px; padding: 6px 10px; border: 1px solid var(--line);
-  border-radius: 9px; background: var(--card); color: var(--brown); cursor: pointer;
-}
-.upload-form button {
-  padding: 7px 12px; border: 0; border-radius: 9px;
-  color: #fff; background: var(--brown); white-space: nowrap;
-}
-.upload-form button:disabled { opacity: .55; cursor: wait; }
-.upload-status { margin: 6px 5px 10px; color: var(--muted); font-size: 11px; }
+.attach-button { flex: 0 0 auto; border: 0; background: transparent; color: var(--brown); font-size: 19px; cursor: pointer; padding: 8px; border-radius: 10px; }
+.attach-button:hover { background: var(--pink-light); }
+.attach-button:disabled { opacity: .55; cursor: wait; }
+.attachment-preview { margin: 8px 4px 0; display: flex; align-items: center; gap: 8px; color: var(--brown); font-size: 12px; }
+.attachment-preview[hidden] { display: none; }
+.attachment-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 6px 9px; border-radius: 9px; background: #fffaf3; border: 1px solid var(--line); overflow-wrap: anywhere; }
+.attachment-remove { border: 0; background: transparent; color: var(--brown); cursor: pointer; font-size: 17px; line-height: 1; }
+.message-attachment { margin-top: 6px; font-size: 11px; color: var(--brown); overflow-wrap: anywhere; }
 
 .composer { display: flex; align-items: flex-end; gap: 10px; padding: 8px 8px 8px 15px; background: #fbf5ed; border: 1px solid var(--line); border-radius: 17px; }
 .composer textarea { flex: 1; min-height: 42px; max-height: 120px; resize: none; padding: 10px 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 14px; line-height: 1.55; }

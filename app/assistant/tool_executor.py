@@ -5,24 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..tooling.tool_registry import execute_tool
+from .tool_names import MODEL_TOOL_NAMES
 
 
 # 这是 Agent 允许模型调用的工具白名单。
 # tool_registry.py 还可能保留兼容旧代码的工具，但没有出现在这里就不能由模型调用。
-MODEL_TOOL_NAMES = (
-    "calculator",
-    "get_current_time",
-    "get_todos",
-    "propose_todo",
-    "complete_todo",
-    "delete_todo",
-    "update_todo",
-    "get_weather",
-    "save_memory",
-    "search_uploaded_documents",
-)
-
-
 @dataclass(frozen=True)
 class ToolExecutionResult:
     """一次工具调用的结构化结果。
@@ -70,6 +57,7 @@ async def execute_model_tool(
     user_id: str,
     allowed_tool_names: tuple[str, ...] | None = None,
     tool_call_id: str | None = None,
+    document_ids: tuple[int, ...] | None = None,
 ) -> ToolExecutionResult:
     """校验工具权限后，通过注册表执行一个已经解析好的工具调用。"""
 
@@ -101,7 +89,10 @@ async def execute_model_tool(
             tool_call_id=tool_call_id,
         )
 
-    content = await execute_tool(name, arguments, user_id)
+    if name == "search_uploaded_documents" and document_ids is not None:
+        content = await execute_tool(name, arguments, user_id, document_ids=document_ids)
+    else:
+        content = await execute_tool(name, arguments, user_id)
     return ToolExecutionResult(
         name=name,
         content=content,
@@ -116,6 +107,7 @@ async def execute_tool_call(
     tool_call: dict[str, Any],
     user_id: str,
     allowed_tool_names: tuple[str, ...] | None = None,
+    document_ids: tuple[int, ...] | None = None,
 ) -> ToolExecutionResult:
     """解析模型原始 tool_call，并执行其中指定的工具。"""
 
@@ -135,6 +127,7 @@ async def execute_tool_call(
             user_id=user_id,
             allowed_tool_names=allowed_tool_names,
             tool_call_id=tool_call_id,
+            document_ids=document_ids,
         )
     except (ValueError, KeyError, TypeError) as exc:
         # 参数解析或具体工具校验失败时，不中断整个 Agent；下一轮让模型根据错误自行修正。

@@ -8,42 +8,11 @@ from typing import Any
 from ..config import settings
 # vector_store 只负责具体的 Chroma/SQLite 联合检索，业务门控放在本服务中。
 from ..storage.vector_store import search_memories
+from .memory_gate import MEMORY_QUERY_HINTS, should_search_memory
 
 
 # 只有问题可能涉及用户长期背景时，才值得访问向量数据库。
 # 这是低成本门控，不是最终语义判断；它主要避免问候、天气和待办反复查询 Chroma。
-MEMORY_QUERY_HINTS = (
-    "长期记忆",
-    "记得我",
-    "之前说过",
-    "上次说过",
-    "我的目标",
-    "职业目标",
-    "求职方向",
-    "工作方向",
-    "发展方向",
-    "想从事",
-    "毕业后",
-    "我的计划",
-    "我的背景",
-    "我的经历",
-    "我的偏好",
-    "我喜欢",
-    "我习惯",
-    "按照我的",
-    "根据我的目标",
-)
-
-
-def should_search_memory(message: str) -> bool:
-    """用轻量关键词判断当前问题是否值得查询长期记忆。"""
-
-    normalized_message = message.strip()
-    if not normalized_message:
-        return False
-    return any(hint in normalized_message for hint in MEMORY_QUERY_HINTS)
-
-
 async def search_relevant_memories(
     *,
     user_id: str,

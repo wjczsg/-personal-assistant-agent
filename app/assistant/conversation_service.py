@@ -36,6 +36,7 @@ async def start_conversation_turn(
     *,
     user_id: str,
     message: str,
+    document_ids: tuple[int, ...] = (),
     history_limit: int = 100,
 ) -> ConversationTurn:
     """读取旧历史和摘要后保存当前问题，返回本轮使用的历史快照。"""
@@ -55,7 +56,7 @@ async def start_conversation_turn(
     history_upper_id = int(records[-1]["id"]) if records else 0
 
     # 快照建立完成后才保存当前问题；数据库会保留它，但它不会进入上面的 history。
-    await asyncio.to_thread(save_message, user_id, "user", message)
+    await asyncio.to_thread(save_message, user_id, "user", message, document_ids)
     return ConversationTurn(
         records=records,
         history=history,

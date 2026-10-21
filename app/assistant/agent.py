@@ -1,5 +1,6 @@
 # 导入类型提示工具。
 import logging
+import asyncio
 from typing import Any
 from uuid import uuid4
 # 导入配置、记忆和工具函数。
@@ -7,6 +8,7 @@ from ..config import settings
 from ..llm.client import llm_client
 from .agent_state import AgentRunState
 from .clarification_service import (
+    PendingResolution,
     clarification_question,
     finish_pending_clarification,
     remember_clarification,
@@ -16,12 +18,15 @@ from .context_budget import ContextBudgetExceeded
 from .context_service import build_model_context, prepare_agent_context
 from .conversation_service import finish_conversation_turn, start_conversation_turn
 from .routing_service import decide_tool_route
+from .memory_service import should_search_memory
 from .tool_executor import (
     MODEL_TOOL_NAMES,
     ToolExecutionResult,
     execute_model_tool as run_model_tool,
     execute_tool_call,
 )
+from .tool_router import ToolRouteDecision, select_tool_route
+from ..storage.database import get_latest_message_attachment_ids
 # 待办确认/取消的识别和数据库操作已经独立到服务模块；Agent 只负责调用。
 from .todo_proposal_service import format_proposal_reply, handle_todo_reply
 
@@ -159,17 +164,33 @@ class PersonalAssistantAgent:
             # 返回一个简单但能体现记忆的演示回答。
             return f"演示模式回答：我收到了“{message}”。最近记忆：{memory_text or '暂时没有历史记录'}"
         # 本地规则、轻量模型兜底和只读工具限制都由 routing_service 统一处理。
-        route_decision = await decide_tool_route(message)
+        route_decision = (
+            select_tool_route(message, needs_memory=should_search_memory(message))
+            if state.document_ids else await decide_tool_route(message)
+        )
+        if state.document_ids:
+            route_decision = ToolRouteDecision(
+                routes=tuple(dict.fromkeys((*route_decision.routes, "document"))),
+                tool_names=tuple(dict.fromkeys((*route_decision.tool_names, "search_uploaded_documents"))),
+            )
         # 上下文服务统一准备提示词、长期记忆、工具定义、历史和摘要状态。
+        # 已绑定附件的问题以本轮检索到的文档为依据；旧回答和滚动摘要
+        # 可能包含另一份文档的内容，不能继续送入这轮文档问答。
+        scoped_to_document = bool(state.document_ids)
         context_state = await prepare_agent_context(
             user_id=self.user_id,
             message=message,
             route_decision=route_decision,
-            history=memory,
-            history_records=state.history_records,
-            history_upper_id=state.history_upper_id,
-            summary_state=state.summary_state,
+            history=[] if scoped_to_document else memory,
+            history_records=[] if scoped_to_document else state.history_records,
+            history_upper_id=0 if scoped_to_document else state.history_upper_id,
+            summary_state=None if scoped_to_document else state.summary_state,
         )
+        if state.document_ids:
+            context_state.system_message["content"] += (
+                "\n当前问题已绑定上传文档。回答文档内容前先调用检索工具；"
+                "检索范围由后端限定为这份文档。"
+            )
         selected_tool_names = context_state.allowed_tool_names
         tool_messages: list[dict[str, Any]] = []
         # 同一条用户消息最多实际检索一次文档，跨工具轮次也生效。
@@ -252,6 +273,7 @@ class PersonalAssistantAgent:
                         tool_call=tool_call,
                         user_id=self.user_id,
                         allowed_tool_names=selected_tool_names,
+                        document_ids=state.document_ids,
                     )
                     if execution.name == "search_uploaded_documents" and execution.executed:
                         document_search_executed = True
@@ -266,7 +288,9 @@ class PersonalAssistantAgent:
         return "工具调用次数超过限制，请稍后再试。"
 
     # Agent 对外提供的主入口。
-    async def run(self, message: str) -> tuple[str, list[dict[str, str]], int]:
+    async def run(
+        self, message: str, document_ids: tuple[int, ...] = ()
+    ) -> tuple[str, list[dict[str, str]], int]:
         """处理一条用户消息并返回回答、工具记录和读取到的历史数量。
 
         这个方法负责整轮编排：建立旧历史快照、创建请求状态、处理待办确认、
@@ -274,9 +298,16 @@ class PersonalAssistantAgent:
         """
 
         # 对话服务先建立旧历史快照，再保存当前问题，避免未回答问题混入旧历史摘要。
+        # 明确指代“这份文档”的追问沿用最近一条带附件消息的范围。
+        followup_ids: tuple[int, ...] = ()
+        if not document_ids and any(cue in message for cue in (
+            "这份文档", "这个文档", "刚才的文档", "刚才的文件", "这份文件",
+        )):
+            followup_ids = await asyncio.to_thread(get_latest_message_attachment_ids, self.user_id)
         turn = await start_conversation_turn(
             user_id=self.user_id,
             message=message,
+            document_ids=document_ids,
         )
         memory = turn.history
         # 每条消息都创建独立状态，并装入本轮开始时读取的历史与摘要快照。
@@ -285,9 +316,15 @@ class PersonalAssistantAgent:
             history_records=list(turn.records),
             history_upper_id=turn.history_upper_id,
             summary_state=dict(turn.summary_state),
+            document_ids=document_ids or followup_ids or None,
         )
         # 在普通路由之前恢复上轮等待补充的任务；新任务或取消会清除旧状态。
-        pending_resolution = await resolve_pending_clarification(self.user_id, message)
+        if document_ids:
+            # 新附件代表新问题，不能被上一轮等待补充的任务截走。
+            await finish_pending_clarification(self.user_id)
+            pending_resolution = PendingResolution(message)
+        else:
+            pending_resolution = await resolve_pending_clarification(self.user_id, message)
         if pending_resolution.direct_answer is not None:
             await finish_conversation_turn(user_id=self.user_id, answer=pending_resolution.direct_answer)
             return pending_resolution.direct_answer, state.tool_calls, turn.history_count

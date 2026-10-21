@@ -354,13 +354,21 @@ async def _run_save_memory(arguments: dict[str, Any], user_id: str) -> str:
 
 
 # 文档检索工具只接收模型给出的问题；用户编号必须来自 Agent 当前会话。
-async def _run_search_uploaded_documents(arguments: dict[str, Any], user_id: str) -> str:
+async def _run_search_uploaded_documents(
+    arguments: dict[str, Any], user_id: str,
+    document_ids: tuple[int, ...] | None = None,
+) -> str:
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
         return "文档检索需要非空的 query 参数。"
     try:
         # 每次最多取三个片段；Chroma 会在内部按 user_id 过滤其他用户的数据。
-        hits = await asyncio.to_thread(search_document_chunks, user_id, query.strip(), 3)
+        if document_ids is None:
+            hits = await asyncio.to_thread(search_document_chunks, user_id, query.strip(), 3)
+        else:
+            hits = await asyncio.to_thread(
+                search_document_chunks, user_id, query.strip(), 3, document_ids
+            )
     except Exception:
         # 检索故障与“文档没有答案”不同，不能让模型把两者混为一谈。
         logger.exception("文档检索工具执行失败：user_id=%s", user_id)
@@ -450,7 +458,11 @@ def get_tool_definitions(names: list[str] | None = None) -> list[dict[str, Any]]
 
 
 # 统一执行注册表中的工具。
-async def execute_tool(name: str, arguments: dict[str, Any] | None = None, user_id: str = "demo-user") -> str:
+async def execute_tool(
+    name: str, arguments: dict[str, Any] | None = None,
+    user_id: str = "demo-user", *,
+    document_ids: tuple[int, ...] | None = None,
+) -> str:
     # 没有参数时使用空字典，避免每个调用方都手动传入 {}。
     safe_arguments = arguments or {}
     # 根据工具名称查找对应的执行函数。
@@ -459,7 +471,10 @@ async def execute_tool(name: str, arguments: dict[str, Any] | None = None, user_
     if handler is None:
         raise ValueError(f"未注册的工具：{name}")
     # 执行工具函数。
-    result = handler(safe_arguments, user_id)
+    result = (
+        _run_search_uploaded_documents(safe_arguments, user_id, document_ids)
+        if name == "search_uploaded_documents" else handler(safe_arguments, user_id)
+    )
     # 兼容异步工具和同步工具的返回值。
     if inspect.isawaitable(result):
         result = await result
